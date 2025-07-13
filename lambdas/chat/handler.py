@@ -12,8 +12,16 @@ from shared.utils import generate_response_prompt, create_success_response, crea
 def create_session_handler(event: Dict, context) -> Dict:
     """Create new chat session"""
     try:
+        # Debug: Log the full event
+        print(f"Create session event: {json.dumps(event, indent=2)}")
+        
+        # Extract user ID from the JWT token
         user_id = event['requestContext']['authorizer']['claims']['sub']
-        body = json.loads(event['body'])
+        
+        # Parse body if it exists
+        body = {}
+        if event.get('body'):
+            body = json.loads(event['body'])
         
         # Get active documents
         document_ids = body.get('document_ids', [])
@@ -35,7 +43,9 @@ def create_session_handler(event: Dict, context) -> Dict:
         
     except Exception as e:
         print(f"Create session error: {str(e)}")
-        return create_error_response(500, 'Failed to create session')
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, f'Failed to create session: {str(e)}')
 
 def list_sessions_handler(event: Dict, context) -> Dict:
     """List user's chat sessions"""
@@ -232,21 +242,31 @@ def get_messages_handler(event: Dict, context) -> Dict:
         user_id = event['requestContext']['authorizer']['claims']['sub']
         session_id = event['pathParameters']['session_id']
         
+        print(f"Getting messages for user {user_id}, session {session_id}")
+        
         # Verify session belongs to user
         sessions = db.list_user_sessions(user_id)
-        if not any(s['session_id'] == session_id for s in sessions):
-            return create_error_response(404, 'Session not found')
+        print(f"User sessions: {sessions}")
+        
+        session_found = any(s['session_id'] == session_id for s in sessions)
+        print(f"Session found: {session_found}")
+        
+        if not session_found:
+            return create_error_response(404, f'Session not found: {session_id}')
         
         # Get messages
         messages = db.get_session_messages(session_id)
+        print(f"Messages retrieved: {len(messages) if messages else 0}")
         
         return create_success_response({
-            'messages': messages,
+            'messages': messages or [],
             'session_id': session_id
         })
         
     except Exception as e:
         print(f"Get messages error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return create_error_response(500, 'Failed to get messages')
 
 def delete_session_handler(event: Dict, context) -> Dict:
@@ -277,19 +297,22 @@ def handler_router(event: Dict, context):
     path = event['path']
     method = event['httpMethod']
 
+    print(f"Handler routing: {method} {path}")
+
     # ✅ Handle CORS preflight
     if method == 'OPTIONS':
         return create_success_response({ "message": "CORS preflight success" })
 
+    # Updated routing to match frontend paths
     if path == '/chat/sessions' and method == 'POST':
         return create_session_handler(event, context)
     elif path == '/chat/sessions' and method == 'GET':
         return list_sessions_handler(event, context)
-    elif '/messages' in path and method == 'POST':
+    elif path.startswith('/chat/sessions/') and path.endswith('/messages') and method == 'POST':
         return chat_handler(event, context)
-    elif '/messages' in path and method == 'GET':
+    elif path.startswith('/chat/sessions/') and path.endswith('/messages') and method == 'GET':
         return get_messages_handler(event, context)
-    elif method == 'DELETE':
+    elif path.startswith('/chat/sessions/') and method == 'DELETE':
         return delete_session_handler(event, context)
     else:
-        return create_error_response(404, 'Not found')
+        return create_error_response(404, f'Not found: {method} {path}')

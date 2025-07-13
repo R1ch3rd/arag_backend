@@ -1,5 +1,5 @@
 # backend/lambdas/documents/handler.py
-# Fixed version with correct DynamoDB key schema
+# Fixed version with correct DynamoDB key schema and CORS OPTIONS handling
 
 import json
 import base64
@@ -11,6 +11,7 @@ from datetime import datetime
 import decimal
 from shared.utils import extract_text_from_file, chunk_text
 from shared.vector_store import vector_store
+
 # Initialize AWS clients
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
@@ -26,7 +27,7 @@ def create_response(status_code: int, body: dict) -> dict:
         'headers': {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
             'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
         },
         'body': json.dumps(body)
@@ -50,6 +51,10 @@ def get_user_id(event: Dict) -> str:
 
 def upload_handler(event: Dict, context) -> Dict:
     """Handle document upload"""
+    # Handle OPTIONS preflight request
+    if event.get('httpMethod') == 'OPTIONS':
+        return create_response(200, {})
+    
     try:
         user_id = get_user_id(event)
         print(f"Processing upload for user: {user_id}")
@@ -170,6 +175,10 @@ def convert_decimal(obj):
 
 def list_handler(event: Dict, context) -> Dict:
     """List user's documents"""
+    # Handle OPTIONS preflight request
+    if event.get('httpMethod') == 'OPTIONS':
+        return create_response(200, {})
+    
     try:
         user_id = get_user_id(event)
         print(f"Listing documents for user: {user_id}")
@@ -214,6 +223,10 @@ def list_handler(event: Dict, context) -> Dict:
 
 def toggle_handler(event: Dict, context) -> Dict:
     """Toggle document active status"""
+    # Handle OPTIONS preflight request
+    if event.get('httpMethod') == 'OPTIONS':
+        return create_response(200, {})
+    
     try:
         user_id = get_user_id(event)
         document_id = event['pathParameters']['document_id']
@@ -269,6 +282,10 @@ def toggle_handler(event: Dict, context) -> Dict:
 
 def delete_handler(event: Dict, context) -> Dict:
     """Delete document"""
+    # Handle OPTIONS preflight request
+    if event.get('httpMethod') == 'OPTIONS':
+        return create_response(200, {})
+    
     try:
         user_id = get_user_id(event)
         document_id = event['pathParameters']['document_id']

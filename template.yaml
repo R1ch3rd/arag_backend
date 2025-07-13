@@ -100,10 +100,6 @@ Resources:
     Properties:
       Name: rag-system-api
       StageName: prod
-      Cors:
-        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
-        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-        AllowOrigin: "'http://localhost:5173'"
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
         Authorizers:
