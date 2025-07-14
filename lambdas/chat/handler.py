@@ -70,6 +70,8 @@ def chat_handler(event: Dict, context) -> Dict:
         body = json.loads(event['body'])
         query = body['message']
         
+        print(f"Chat handler - User: {user_id}, Session: {session_id}, Query: {query}")
+        
         # Check rate limit
         if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
             return create_error_response(429, 'Chat rate limit exceeded')
@@ -83,12 +85,14 @@ def chat_handler(event: Dict, context) -> Dict:
                 'cached': True
             })
         
-        # Get session info
-        sessions = db.list_user_sessions(user_id)
-        session = next((s for s in sessions if s['session_id'] == session_id), None)
+        # Get session info using direct lookup
+        session = db.get_session(user_id, session_id)
         
         if not session:
-            return create_error_response(404, 'Session not found')
+            print(f"Session not found: {session_id} for user {user_id}")
+            return create_error_response(404, f'Session not found: {session_id}')
+        
+        print(f"Session found: {session}")
         
         # Generate query embedding
         query_embedding = vector_store.generate_embeddings([query])[0]
@@ -244,22 +248,33 @@ def get_messages_handler(event: Dict, context) -> Dict:
         
         print(f"Getting messages for user {user_id}, session {session_id}")
         
-        # Verify session belongs to user
-        sessions = db.list_user_sessions(user_id)
-        print(f"User sessions: {sessions}")
+        # Verify session belongs to user - use direct lookup
+        session = db.get_session(user_id, session_id)
         
-        session_found = any(s['session_id'] == session_id for s in sessions)
-        print(f"Session found: {session_found}")
-        
-        if not session_found:
+        if not session:
+            print(f"Session not found: {session_id} for user {user_id}")
             return create_error_response(404, f'Session not found: {session_id}')
+        
+        print(f"Session found: {session}")
         
         # Get messages
         messages = db.get_session_messages(session_id)
         print(f"Messages retrieved: {len(messages) if messages else 0}")
         
+        # Transform messages to match frontend expectations
+        formatted_messages = []
+        if messages:
+            for msg in messages:
+                formatted_messages.append({
+                    'id': msg.get('SK', ''),  # Use SK as ID
+                    'content': msg.get('content', ''),
+                    'role': msg.get('role', ''),
+                    'timestamp': msg.get('timestamp', ''),
+                    'sessionId': session_id
+                })
+        
         return create_success_response({
-            'messages': messages or [],
+            'messages': formatted_messages,
             'session_id': session_id
         })
         
@@ -268,6 +283,7 @@ def get_messages_handler(event: Dict, context) -> Dict:
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Failed to get messages')
+
 
 def delete_session_handler(event: Dict, context) -> Dict:
     """Delete a chat session"""
@@ -294,14 +310,21 @@ def delete_session_handler(event: Dict, context) -> Dict:
 # Handler mapping for Lambda
 def handler_router(event: Dict, context):
     """Route to appropriate handler based on HTTP method and path"""
-    path = event['path']
+    original_path = event['path']
     method = event['httpMethod']
 
-    print(f"Handler routing: {method} {path}")
+    print(f"Handler routing: {method} {original_path}")
 
     # ✅ Handle CORS preflight
     if method == 'OPTIONS':
         return create_success_response({ "message": "CORS preflight success" })
+
+    # Remove /api prefix if present for routing
+    path = original_path
+    if path.startswith('/api'):
+        path = path[4:]  # Remove '/api' prefix
+    
+    print(f"Processed path for routing: {path}")
 
     # Updated routing to match frontend paths
     if path == '/chat/sessions' and method == 'POST':
@@ -315,4 +338,4 @@ def handler_router(event: Dict, context):
     elif path.startswith('/chat/sessions/') and method == 'DELETE':
         return delete_session_handler(event, context)
     else:
-        return create_error_response(404, f'Not found: {method} {path}')
+        return create_error_response(404, f'Not found: {method} {original_path} (processed: {path})')

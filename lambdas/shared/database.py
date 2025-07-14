@@ -26,6 +26,7 @@ class DynamoDBClient:
         self.sessions_table = self.dynamodb.Table(config.SESSIONS_TABLE)
         self.messages_table = self.dynamodb.Table(config.MESSAGES_TABLE)
     
+    
     # User operations
     def create_user(self, user_id: str, email: str, username: str) -> Dict:
         """Create a new user"""
@@ -47,7 +48,16 @@ class DynamoDBClient:
             Key={'PK': f'USER#{user_id}', 'SK': 'PROFILE'}
         )
         return response.get('Item')
-    
+    def get_session(self, user_id: str, session_id: str) -> Optional[Dict]:
+        """Get a specific session for a user"""
+        try:
+            response = self.sessions_table.get_item(
+                Key={'PK': f'USER#{user_id}', 'SK': f'SESSION#{session_id}'}
+            )
+            return response.get('Item')
+        except Exception as e:
+            print(f"Error getting session: {e}")
+            return None
     # Document operations
     def create_document(self, user_id: str, document_id: str, metadata: Dict) -> Dict:
         """Create document record"""
