@@ -5,7 +5,7 @@ from typing import List, Dict, Tuple
 import re
 from .config import config
 from datetime import datetime
-
+from decimal import Decimal
 # Try to import document processing libraries with fallbacks
 try:
     import PyPDF2
@@ -22,6 +22,17 @@ except ImportError:
     print("python-docx not available")
 
 s3_client = boto3.client('s3')
+
+
+def convert_decimals(obj):
+    if isinstance(obj, list):
+        return [convert_decimals(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {key: convert_decimals(value) for key, value in obj.items()}
+    elif isinstance(obj, Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+    else:
+        return obj
 
 def extract_text_from_file(file_content: bytes, filename: str) -> str:
     """Extract text from various file formats"""

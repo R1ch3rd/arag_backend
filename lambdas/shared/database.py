@@ -7,6 +7,7 @@ from decimal import Decimal
 from .config import config
 import json
 import requests
+from .utils import create_error_response, create_success_response
 
 def convert_floats_to_decimal(obj):
     if isinstance(obj, list):
@@ -191,6 +192,97 @@ class DynamoDBClient:
                 batch.delete_item(
                     Key={'PK': msg['PK'], 'SK': msg['SK']}
                 )
+    def update_session_title(self, user_id: str, session_id: str, title: str):
+        """Update session title"""
+        self.sessions_table.update_item(
+            Key={'PK': f'USER#{user_id}', 'SK': f'SESSION#{session_id}'},
+            UpdateExpression="SET title = :title, last_accessed = :now",
+            ExpressionAttributeValues={
+                ':title': title,
+                ':now': datetime.utcnow().isoformat()
+            }
+        )
+
+    def get_session_with_last_message(self, user_id: str, session_id: str) -> Optional[Dict]:
+        """Get session with the last message content"""
+        session = self.get_session(user_id, session_id)
+        if not session:
+            return None
+        
+        # Get the most recent message
+        messages = self.get_session_messages(session_id, limit=1)
+        last_message = ""
+        if messages:
+            last_message = messages[-1].get('content', '')[:100] + ('...' if len(messages[-1].get('content', '')) > 100 else '')
+        
+        session['last_message'] = last_message
+        return session
+
+    def list_user_sessions_with_preview(self, user_id: str, limit: int = 20) -> List[Dict]:
+        """List user's chat sessions with message previews"""
+        try:
+            sessions = self.list_user_sessions(user_id)
+            print(f"Got {len(sessions)} sessions from list_user_sessions")
+            
+            # Add last message preview to each session
+            for session in sessions:
+                try:
+                    session_id = session.get('session_id')
+                    if session_id:
+                        messages = self.get_session_messages(session_id, limit=1)
+                        if messages:
+                            last_msg = messages[-1]
+                            preview = last_msg.get('content', '')[:100]
+                            if len(last_msg.get('content', '')) > 100:
+                                preview += '...'
+                            session['last_message'] = preview
+                        else:
+                            session['last_message'] = ''
+                    else:
+                        session['last_message'] = ''
+                except Exception as e:
+                    print(f"Error getting preview for session {session.get('session_id', 'unknown')}: {e}")
+                    session['last_message'] = ''
+            
+            return sessions[:limit]
+            
+        except Exception as e:
+            print(f"Error in list_user_sessions_with_preview: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def search_sessions(self, user_id: str, query: str, limit: int = 20) -> List[Dict]:
+        """Search sessions by title or message content (basic implementation)"""
+        # For now, this is a simple implementation
+        # In production, you'd want to use proper search indexing
+        sessions = self.list_user_sessions(user_id)
+        
+        query_lower = query.lower()
+        filtered_sessions = []
+        
+        for session in sessions:
+            # Search in session title
+            title_match = query_lower in (session.get('title', '').lower())
+            
+            # Search in messages (this is expensive - consider using search service in production)
+            message_match = False
+            if not title_match:
+                messages = self.get_session_messages(session['session_id'])
+                for msg in messages:
+                    if query_lower in msg.get('content', '').lower():
+                        message_match = True
+                        break
+            
+            if title_match or message_match:
+                # Add preview of matching content
+                if title_match:
+                    session['match_type'] = 'title'
+                else:
+                    session['match_type'] = 'message'
+                filtered_sessions.append(session)
+        
+        return filtered_sessions[:limit]
 
 db = DynamoDBClient()
 

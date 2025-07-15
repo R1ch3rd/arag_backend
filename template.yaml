@@ -100,6 +100,10 @@ Resources:
     Properties:
       Name: rag-system-api
       StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
         Authorizers:
@@ -249,54 +253,82 @@ Resources:
         - S3CrudPolicy:
             BucketName: !Ref DocumentsBucketName
 
-  CreateSessionFunction:
+  # Chat Functions - Using single handler with routing
+  ChatRouterFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: lambdas/
-      Handler: chat.handler.create_session_handler
-      Events:
-        ApiEvent:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /chat/sessions
-            Method: POST
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SessionsTable
-        - DynamoDBReadPolicy:
-            TableName: !Ref DocumentsTable
-
-  ListSessionsFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: lambdas/
-      Handler: chat.handler.list_sessions_handler
-      Events:
-        ApiEvent:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /chat/sessions
-            Method: GET
-      Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref SessionsTable
-
-  ChatFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: lambdas/
-      Handler: chat.handler.chat_handler
+      Handler: chat.handler.handler_router
       Timeout: 60
       MemorySize: 1024
       Events:
-        ApiEvent:
+        # Session Management
+        CreateSession:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions
+            Method: POST
+        ListSessions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions
+            Method: GET
+        UpdateSession:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/{session_id}
+            Method: PUT
+        DeleteSession:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/{session_id}
+            Method: DELETE
+        SearchSessions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/search
+            Method: GET
+        ExportSession:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/{session_id}/export
+            Method: GET
+        # Message Operations
+        SendMessage:
           Type: Api
           Properties:
             RestApiId: !Ref Api
             Path: /chat/sessions/{session_id}/messages
             Method: POST
+        GetMessages:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/{session_id}/messages
+            Method: GET
+        # OPTIONS for CORS
+        OptionsChats:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/{proxy+}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        OptionsCache:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /cache/{proxy+}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable
@@ -305,23 +337,81 @@ Resources:
         - DynamoDBReadPolicy:
             TableName: !Ref DocumentsTable
 
-  GetMessagesFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: lambdas/
-      Handler: chat.handler.get_messages_handler
-      Events:
-        ApiEvent:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /chat/sessions/{session_id}/messages
-            Method: GET
-      Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref SessionsTable
-        - DynamoDBReadPolicy:
-            TableName: !Ref MessagesTable
+  # Keep individual functions as backup/alternatives (commented out)
+  # You can remove these if the router function works well
+  # CreateSessionFunction:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     CodeUri: lambdas/
+  #     Handler: chat.handler.create_session_handler
+  #     Events:
+  #       ApiEvent:
+  #         Type: Api
+  #         Properties:
+  #           RestApiId: !Ref Api
+  #           Path: /chat/sessions
+  #           Method: POST
+  #     Policies:
+  #       - DynamoDBCrudPolicy:
+  #           TableName: !Ref SessionsTable
+  #       - DynamoDBReadPolicy:
+  #           TableName: !Ref DocumentsTable
+
+  # ListSessionsFunction:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     CodeUri: lambdas/
+  #     Handler: chat.handler.list_sessions_handler
+  #     Events:
+  #       ApiEvent:
+  #         Type: Api
+  #         Properties:
+  #           RestApiId: !Ref Api
+  #           Path: /chat/sessions
+  #           Method: GET
+  #     Policies:
+  #       - DynamoDBReadPolicy:
+  #           TableName: !Ref SessionsTable
+
+  # ChatFunction:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     CodeUri: lambdas/
+  #     Handler: chat.handler.chat_handler
+  #     Timeout: 60
+  #     MemorySize: 1024
+  #     Events:
+  #       ApiEvent:
+  #         Type: Api
+  #         Properties:
+  #           RestApiId: !Ref Api
+  #           Path: /chat/sessions/{session_id}/messages
+  #           Method: POST
+  #     Policies:
+  #       - DynamoDBCrudPolicy:
+  #           TableName: !Ref SessionsTable
+  #       - DynamoDBCrudPolicy:
+  #           TableName: !Ref MessagesTable
+  #       - DynamoDBReadPolicy:
+  #           TableName: !Ref DocumentsTable
+
+  # GetMessagesFunction:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     CodeUri: lambdas/
+  #     Handler: chat.handler.get_messages_handler
+  #     Events:
+  #       ApiEvent:
+  #         Type: Api
+  #         Properties:
+  #           RestApiId: !Ref Api
+  #           Path: /chat/sessions/{session_id}/messages
+  #           Method: GET
+  #     Policies:
+  #       - DynamoDBReadPolicy:
+  #           TableName: !Ref SessionsTable
+  #       - DynamoDBReadPolicy:
+  #           TableName: !Ref MessagesTable
 
 Outputs:
   ApiUrl:
