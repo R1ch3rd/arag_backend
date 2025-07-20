@@ -145,33 +145,46 @@ def delete_from_s3(s3_key: str):
         print(f"S3 delete error: {e}")
         raise
 
-def create_error_response(status_code: int, message: str) -> Dict:
-    """Create standardized error response"""
+def create_error_response(status_code: int, message: str, details: str = None) -> Dict:
+    """Create standardized error response with enhanced CORS headers"""
+    error_body = {
+        'error': message,
+        'timestamp': datetime.utcnow().isoformat()
+    }
+    
+    if details:
+        error_body['details'] = details
+    
+    # Convert any Decimals in error details
+    serializable_error = convert_decimals(error_body)
+    
     return {
         'statusCode': status_code,
         'headers': {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+            'Access-Control-Allow-Credentials': 'false'
         },
-        'body': json.dumps({
-            'error': message,
-            'timestamp': datetime.utcnow().isoformat()
-        })
+        'body': json.dumps(serializable_error)
     }
 
-def create_success_response(data: Dict) -> Dict:
-    """Create standardized success response"""
+def create_success_response(data: Dict, status_code: int = 200) -> Dict:
+    """Create standardized success response with enhanced CORS headers"""
+    # Convert Decimal objects to serializable types BEFORE json.dumps
+    serializable_data = convert_decimals(data)
+    
     return {
-        'statusCode': 200,
+        'statusCode': status_code,
         'headers': {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+            'Access-Control-Allow-Credentials': 'false'
         },
-        'body': json.dumps(data)
+        'body': json.dumps(serializable_data)  # Now this will work!
     }
 
 def sanitize_filename(filename: str) -> str:

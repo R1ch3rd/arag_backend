@@ -9,14 +9,41 @@ from shared.vector_store import vector_store
 from shared.cache import cache
 from decimal import Decimal
 from shared.utils import generate_response_prompt, create_success_response, create_error_response
+from datetime import datetime
 
 def create_session_handler(event: Dict, context) -> Dict:
-    """Create new chat session and clear user cache"""
+    """Create new chat session and clear user cache - ENHANCED WITH DEBUGGING"""
     try:
-        user_id = event['requestContext']['authorizer']['claims']['sub']
+        # Debug the entire event structure
+        print(f"=== CREATE SESSION DEBUG ===")
+        print(f"Full event: {json.dumps(event, indent=2, default=str)}")
+        
+        # Try to safely get user_id
+        request_context = event.get('requestContext', {})
+        authorizer = request_context.get('authorizer', {})
+        claims = authorizer.get('claims', {})
+        
+        print(f"Request context: {request_context}")
+        print(f"Authorizer: {authorizer}")
+        print(f"Claims: {claims}")
+        
+        user_id = claims.get('sub')
+        
+        if not user_id:
+            # Try alternative paths
+            if 'principalId' in authorizer:
+                user_id = authorizer['principalId']
+            else:
+                print("ERROR: No user_id found in authorization context")
+                return create_error_response(401, 'User not authenticated')
+        
+        print(f"User ID: {user_id}")
         body = json.loads(event.get('body', '{}'))
         
-        print(f"Creating session for user: {user_id}")
+        print(f"=== CREATE SESSION DEBUG ===")
+        print(f"User ID: {user_id}")
+        print(f"Body: {body}")
+        print(f"Timestamp: {datetime.now()}")
         
         # Clear user cache when creating new session
         print("Clearing user cache for new session...")
@@ -36,13 +63,31 @@ def create_session_handler(event: Dict, context) -> Dict:
         
         # Create session
         session_id = db.create_session(user_id, document_ids)
+        print(f"Session created in DB with ID: {session_id}")
         
-        print("Session created with ID:", session_id)
+        # IMPORTANT: Verify the session was actually created
+        created_session = db.get_session(user_id, session_id)
+        print(f"Verification - session retrieved: {created_session}")
+        
+        # Check if session appears in list immediately
+        all_sessions = db.list_user_sessions(user_id)
+        new_session_in_list = any(s.get('session_id') == session_id for s in all_sessions)
+        print(f"New session appears in list: {new_session_in_list}")
+        
+        if not new_session_in_list:
+            print("WARNING: Newly created session does not appear in session list!")
+            print(f"All session IDs: {[s.get('session_id', 'NO_ID')[:8] for s in all_sessions[:5]]}")
         
         return create_success_response({
             'session_id': session_id,
             'document_ids': document_ids,
-            'cache_cleared': True
+            'cache_cleared': True,
+            'debug_info': {
+                'created_session': created_session,
+                'appears_in_list': new_session_in_list,
+                'total_sessions': len(all_sessions),
+                'timestamp': datetime.now().isoformat()
+            }
         })
         
     except Exception as e:
@@ -51,11 +96,54 @@ def create_session_handler(event: Dict, context) -> Dict:
         traceback.print_exc()
         return create_error_response(500, 'Failed to create session')
 
+
+def test_auth_handler(event: Dict, context) -> Dict:
+    """Test authentication and return user info"""
+    try:
+        print(f"Test auth event: {json.dumps(event, indent=2, default=str)}")
+        
+        # Try all possible ways to get user_id
+        user_id = None
+        auth_info = {}
+        
+        # Method 1: From authorizer claims
+        request_context = event.get('requestContext', {})
+        authorizer = request_context.get('authorizer', {})
+        claims = authorizer.get('claims', {})
+        
+        if claims and 'sub' in claims:
+            user_id = claims['sub']
+            auth_info['method'] = 'claims'
+            auth_info['claims'] = claims
+        elif 'principalId' in authorizer:
+            user_id = authorizer['principalId']
+            auth_info['method'] = 'principalId'
+        
+        # Method 2: From headers
+        headers = event.get('headers', {})
+        auth_header = headers.get('Authorization', '')
+        auth_info['has_auth_header'] = bool(auth_header)
+        
+        return create_success_response({
+            'user_id': user_id,
+            'auth_info': auth_info,
+            'request_context': request_context,
+            'headers': {k: v[:50] + '...' if len(v) > 50 else v for k, v in headers.items()}
+        })
+        
+    except Exception as e:
+        print(f"Test auth error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, f'Test auth failed: {str(e)}')
+
 def list_sessions_handler(event: Dict, context) -> Dict:
-    """List user's chat sessions with previews"""
+    """List user's chat sessions with previews - ENHANCED WITH DEBUGGING"""
     try:
         user_id = event['requestContext']['authorizer']['claims']['sub']
-        print(f"Listing sessions for user: {user_id}")
+        print(f"=== LIST SESSIONS DEBUG ===")
+        print(f"User ID: {user_id}")
+        print(f"Timestamp: {datetime.now()}")
         
         # Get query parameters
         query_params = event.get('queryStringParameters', {}) or {}
@@ -70,7 +158,20 @@ def list_sessions_handler(event: Dict, context) -> Dict:
         else:
             sessions = db.list_user_sessions(user_id)
         
-        print(f"Retrieved {len(sessions)} sessions")
+        print(f"Raw sessions from DB: {len(sessions)}")
+        
+        # DEBUG: Print first few sessions
+        if sessions:
+            print(f"First 3 sessions from DB:")
+            for i, session in enumerate(sessions[:3]):
+                print(f"  {i+1}. ID: {session.get('session_id', 'NO_ID')[:8]}...")
+                print(f"     Title: {session.get('title', 'NO_TITLE')}")
+                print(f"     Created: {session.get('created_at', 'NO_CREATED')}")
+                print(f"     Last accessed: {session.get('last_accessed', 'NO_ACCESSED')}")
+                print(f"     Last message at: {session.get('last_message_at', 'NO_LAST_MSG')}")
+                print(f"     Message count: {session.get('message_count', 'NO_COUNT')}")
+                print(f"     Raw session: {session}")
+                print()
         
         # Convert Decimal objects to serializable types
         serializable_sessions = []
@@ -78,13 +179,11 @@ def list_sessions_handler(event: Dict, context) -> Dict:
             serializable_session = {}
             for key, value in session.items():
                 if isinstance(value, Decimal):
-                    # Convert to int if it's a whole number, otherwise float
                     if value % 1 == 0:
                         serializable_session[key] = int(value)
                     else:
                         serializable_session[key] = float(value)
                 elif isinstance(value, list):
-                    # Handle lists that might contain Decimals
                     serializable_session[key] = [
                         int(item) if isinstance(item, Decimal) and item % 1 == 0 
                         else float(item) if isinstance(item, Decimal)
@@ -95,9 +194,25 @@ def list_sessions_handler(event: Dict, context) -> Dict:
                     serializable_session[key] = value
             serializable_sessions.append(serializable_session)
         
+        # DEBUG: Print serialized sessions
+        print(f"Serialized sessions: {len(serializable_sessions)}")
+        if serializable_sessions:
+            print(f"First serialized session: {serializable_sessions[0]}")
+        
+        # Sort sessions by last_message_at or last_accessed (most recent first)
+        serializable_sessions.sort(key=lambda x: x.get('last_message_at', x.get('last_accessed', '1900-01-01')), reverse=True)
+        
+        print(f"After sorting - first session: {serializable_sessions[0] if serializable_sessions else 'NONE'}")
+        
         return create_success_response({
             'sessions': serializable_sessions,
-            'count': len(serializable_sessions)
+            'count': len(serializable_sessions),
+            'debug_info': {
+                'user_id': user_id,
+                'raw_count': len(sessions),
+                'serialized_count': len(serializable_sessions),
+                'timestamp': datetime.now().isoformat()
+            }
         })
         
     except Exception as e:
@@ -105,7 +220,6 @@ def list_sessions_handler(event: Dict, context) -> Dict:
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Failed to list sessions')
-
 
 def chat_handler(event: Dict, context) -> Dict:
     """Handle chat message"""
@@ -330,10 +444,68 @@ def generate_llm_response(query: str, contexts: List[Dict]) -> tuple:
     return response_text, sources
 
 def clear_cache_handler(event: Dict, context) -> Dict:
-    """Clear user's cache"""
+    """Clear user's cache with enhanced debugging"""
     try:
-        user_id = event['requestContext']['authorizer']['claims']['sub']
-        print(f"Clearing cache for user: {user_id}")
+        # DEBUG: Print the entire event structure
+        print("=== CLEAR CACHE DEBUG ===")
+        print(f"Full event: {json.dumps(event, indent=2, default=str)}")
+        print(f"Context: {context}")
+        
+        # Check if we have proper authorization context
+        request_context = event.get('requestContext', {})
+        authorizer = request_context.get('authorizer', {})
+        claims = authorizer.get('claims', {})
+        
+        print(f"Request context: {request_context}")
+        print(f"Authorizer: {authorizer}")
+        print(f"Claims: {claims}")
+        
+        # Try to get user_id from different possible locations
+        user_id = None
+        
+        # Method 1: From authorizer claims (API Gateway + Cognito)
+        if claims and 'sub' in claims:
+            user_id = claims['sub']
+            print(f"Got user_id from authorizer claims: {user_id}")
+        
+        # Method 2: From authorizer directly (custom authorizer)
+        elif authorizer and 'principalId' in authorizer:
+            user_id = authorizer['principalId']
+            print(f"Got user_id from authorizer principalId: {user_id}")
+        
+        # Method 3: From headers (if using custom auth)
+        elif 'headers' in event:
+            auth_header = event['headers'].get('Authorization', '')
+            print(f"Authorization header: {auth_header[:50]}..." if auth_header else "No Authorization header")
+            
+            # Try to decode JWT manually if needed
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+                try:
+                    # Basic JWT decode without verification (for debugging)
+                    import base64
+                    import json
+                    
+                    # Split JWT parts
+                    parts = token.split('.')
+                    if len(parts) == 3:
+                        # Decode payload
+                        payload = parts[1]
+                        # Add padding if needed
+                        payload += '=' * (4 - len(payload) % 4)
+                        decoded = base64.b64decode(payload)
+                        payload_data = json.loads(decoded)
+                        user_id = payload_data.get('sub')
+                        print(f"Decoded user_id from JWT: {user_id}")
+                        print(f"JWT payload: {payload_data}")
+                except Exception as jwt_error:
+                    print(f"JWT decode error: {jwt_error}")
+        
+        if not user_id:
+            print("ERROR: Could not determine user_id from any method")
+            return create_error_response(403, 'Unable to identify user - missing or invalid authorization')
+        
+        print(f"Final user_id: {user_id}")
         
         # Get cache stats before clearing
         stats_before = cache.get_cache_stats(user_id)
@@ -350,14 +522,19 @@ def clear_cache_handler(event: Dict, context) -> Dict:
             'message': 'Cache cleared successfully',
             'user_id': user_id,
             'stats_before': stats_before,
-            'stats_after': stats_after
+            'stats_after': stats_after,
+            'debug_info': {
+                'auth_method': 'claims' if claims else 'header' if 'headers' in event else 'unknown',
+                'had_claims': bool(claims),
+                'had_auth_header': bool(event.get('headers', {}).get('Authorization'))
+            }
         })
         
     except Exception as e:
         print(f"Clear cache error: {str(e)}")
         import traceback
         traceback.print_exc()
-        return create_error_response(500, 'Failed to clear cache')
+        return create_error_response(500, f'Failed to clear cache: {str(e)}')
 
 def delete_session_handler(event: Dict, context) -> Dict:
     """Delete a chat session with support for force empty deletion"""
@@ -584,7 +761,6 @@ def get_messages_handler(event: Dict, context) -> Dict:
 
 
 
-
 def handler_router(event: Dict, context):
     """Route to appropriate handler based on HTTP method and path"""
     try:
@@ -592,6 +768,8 @@ def handler_router(event: Dict, context):
         method = event.get('httpMethod', '')
 
         print(f"Handler routing: {method} {original_path}")
+        print(f"Event path parameters: {event.get('pathParameters', {})}")
+        print(f"Event query parameters: {event.get('queryStringParameters', {})}")
 
         # Handle CORS preflight
         if method == 'OPTIONS':
@@ -604,32 +782,47 @@ def handler_router(event: Dict, context):
         
         print(f"Processed path for routing: {path}")
 
-        # Cache management routes
-        if path == '/cache/clear' and method == 'POST':
+        # Cache management routes - ADD MORE FLEXIBLE MATCHING
+        if path.endswith('/cache/clear') and method == 'POST':
+            print("Routing to clear_cache_handler")
             return clear_cache_handler(event, context)
-        elif path == '/cache/stats' and method == 'GET':
+        elif path.endswith('/cache/stats') and method == 'GET':
+            print("Routing to get_cache_stats_handler")
             return get_cache_stats_handler(event, context)
         
         # Session management routes
         elif path == '/chat/sessions' and method == 'POST':
+            print("Routing to create_session_handler")
             return create_session_handler(event, context)
         elif path == '/chat/sessions' and method == 'GET':
+            print("Routing to list_sessions_handler")
             return list_sessions_handler(event, context)
         elif path == '/chat/sessions/search' and method == 'GET':
+            print("Routing to search_sessions_handler")
             return search_sessions_handler(event, context)
         elif path.startswith('/chat/sessions/') and path.endswith('/messages') and method == 'POST':
+            print("Routing to chat_handler")
             return chat_handler(event, context)
         elif path.startswith('/chat/sessions/') and path.endswith('/messages') and method == 'GET':
+            print("Routing to get_messages_handler")
             return get_messages_handler(event, context)
         elif path.startswith('/chat/sessions/') and path.endswith('/export') and method == 'GET':
+            print("Routing to export_session_handler")
             return export_session_handler(event, context)
         elif path.startswith('/chat/sessions/') and path.endswith('/auto-title') and method == 'POST':
+            print("Routing to auto_title_session_handler")
             return auto_title_session_handler(event, context)
         elif path.startswith('/chat/sessions/') and not path.endswith('/messages') and not path.endswith('/export') and not path.endswith('/auto-title') and method == 'PUT':
+            print("Routing to update_session_handler")
             return update_session_handler(event, context)
         elif path.startswith('/chat/sessions/') and not path.endswith('/messages') and not path.endswith('/export') and not path.endswith('/auto-title') and method == 'DELETE':
+            print("Routing to delete_session_handler")
             return delete_session_handler(event, context)
+        elif path == '/test/auth' and method == 'GET':
+            print("Routing to test_auth_handler")
+            return test_auth_handler(event, context)
         else:
+            print(f"No route found for: {method} {original_path} (processed: {path})")
             return create_error_response(404, f'Not found: {method} {original_path} (processed: {path})')
     
     except Exception as e:
