@@ -22,7 +22,7 @@ Globals:
         HF_API_TOKEN: !Ref HuggingFaceToken
         LLM_PROVIDER: !Ref LLMProvider
         TOGETHER_API_KEY: !Ref TogetherApiKey
-        GROQ_API_KEY: !Ref GroqApiKey
+        GEMINI_API_KEY: !Ref GeminiApiKey
 
 Parameters:
   PineconeApiKey:
@@ -46,15 +46,16 @@ Parameters:
   LLMProvider:
     Type: String
     Default: together
-    AllowedValues: [together, groq]
+    AllowedValues: [together, gemini]
   TogetherApiKey:
     Type: String
     NoEcho: true
     Default: ""
-  GroqApiKey:
+  GeminiApiKey:
     Type: String
     NoEcho: true
-    Default: ""
+    Description: Google Gemini API Key
+
   DocumentsBucketName:
     Type: String
     Default: rag-documents-536697240321

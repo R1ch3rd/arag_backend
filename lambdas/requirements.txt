@@ -6,3 +6,4 @@ requests
 docx
 PyJWT
 python-dateutil
+google-generativeai

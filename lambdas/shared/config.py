@@ -32,7 +32,7 @@ class Config:
     LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'together')  # 'together' or 'groq'
     TOGETHER_API_KEY = os.environ.get('TOGETHER_API_KEY')
     # GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
-    
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
     # RAG Config
     CHUNK_SIZE = 512
     CHUNK_OVERLAP = 128

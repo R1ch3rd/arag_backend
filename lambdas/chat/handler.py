@@ -222,36 +222,41 @@ def list_sessions_handler(event: Dict, context) -> Dict:
         return create_error_response(500, 'Failed to list sessions')
 
 def chat_handler(event: Dict, context) -> Dict:
-    """Handle chat message"""
+    """Handle chat message with DYNAMIC model selection"""
     try:
         user_id = event['requestContext']['authorizer']['claims']['sub']
         session_id = event['pathParameters']['session_id']
         body = json.loads(event['body'])
         query = body['message']
         
-        print(f"Chat handler - User: {user_id}, Session: {session_id}, Query: {query}")
+        # ✅ GET MODEL FROM REQUEST (not config!)
+        selected_model = body.get('model', 'together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free')
+        
+        print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
+        print(f"🎯 Query: {query}")
+        print(f"🤖 Selected model: {selected_model}")
         
         # Check rate limit
         if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
             return create_error_response(429, 'Chat rate limit exceeded')
         
-        # Check cache
-        cached_result = cache.get_cached_query(user_id, query)
+        # ✅ MODEL-SPECIFIC CACHE KEY
+        cache_key = f"{query}_{selected_model}"
+        cached_result = cache.get_cached_query(user_id, cache_key)
+        
         if cached_result:
+            print(f"💾 Returning cached response for {selected_model}")
             return create_success_response({
                 'response': cached_result['response'],
                 'sources': cached_result['sources'],
-                'cached': True
+                'cached': True,
+                'model_used': selected_model
             })
         
-        # Get session info using direct lookup
+        # Get session info
         session = db.get_session(user_id, session_id)
-        
         if not session:
-            print(f"Session not found: {session_id} for user {user_id}")
             return create_error_response(404, f'Session not found: {session_id}')
-        
-        print(f"Session found: {session}")
         
         # Generate query embedding
         query_embedding = vector_store.generate_embeddings([query])[0]
@@ -268,28 +273,32 @@ def chat_handler(event: Dict, context) -> Dict:
             response_text = "I couldn't find relevant information in your documents to answer this question."
             sources = []
         else:
-            # Generate response using LLM
-            response_text, sources = generate_llm_response(query, search_results)
+            # ✅ GENERATE RESPONSE WITH SELECTED MODEL
+            response_text, sources = generate_llm_response(query, search_results, selected_model)
         
         # Store messages in database
         db.add_message(user_id, session_id, 'user', query)
         db.add_message(user_id, session_id, 'assistant', response_text, sources)
         
-        # Cache result
+        # ✅ CACHE WITH MODEL-SPECIFIC KEY
         result = {
             'response': response_text,
-            'sources': sources
+            'sources': sources,
+            'model_used': selected_model
         }
-        cache.cache_query_result(user_id, query, result)
+        cache.cache_query_result(user_id, cache_key, result)
+        
+        print(f"✅ Response generated successfully with {selected_model}")
         
         return create_success_response({
             'response': response_text,
             'sources': sources,
-            'cached': False
+            'cached': False,
+            'model_used': selected_model
         })
         
     except Exception as e:
-        print(f"Chat error: {str(e)}")
+        print(f"❌ Chat handler error: {str(e)}")
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Failed to process message')
@@ -416,19 +425,41 @@ def export_session_handler(event: Dict, context) -> Dict:
         print(f"Export session error: {str(e)}")
         return create_error_response(500, 'Failed to export session')
 
-def generate_llm_response(query: str, contexts: List[Dict]) -> tuple:
-    """Generate response using LLM"""
+def generate_llm_response(query: str, contexts: List[Dict], model: str = None) -> tuple:
+    """Generate response using LLM with DYNAMIC model selection"""
     prompt = generate_response_prompt(query, contexts)
     
+    # Extract provider from model string (not from static config!)
+    if not model:
+        model = "together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"  # Default
+    
+    print(f"🤖 LLM Request - Full model: {model}")
+    
     try:
-        if config.LLM_PROVIDER == 'together':
-            response_text = call_together_ai(prompt)
-        elif config.LLM_PROVIDER == 'groq':
-            response_text = call_groq(prompt)
+        # ✅ DYNAMIC ROUTING based on model prefix
+        if model.startswith("together-"):
+            # Extract model name: "together-meta-llama/Llama-3.3-70B" → "meta-llama/Llama-3.3-70B"
+            model_name = model.replace("together-", "")
+            print(f"🟢 Using Together AI with model: {model_name}")
+            response_text = call_together_ai(prompt, model_name)
+            
+        elif model.startswith("gemini-"):
+            # Extract model name: "gemini-1.5-flash" → "1.5-flash"
+            model_name = model.replace("gemini-", "")
+            # But we need to add "gemini-" back for the actual API call
+            actual_model_name = f"gemini-{model_name}"
+            print(f"🔵 Using Gemini with model: {actual_model_name}")
+            response_text = call_gemini(prompt, actual_model_name)
+            
         else:
-            response_text = "LLM provider not configured. Please set LLM_PROVIDER environment variable."
+            # Fallback for unknown models
+            print(f"⚠️ Unknown model format: {model}, using default Together AI")
+            response_text = call_together_ai(prompt, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
+            
     except Exception as e:
-        print(f"LLM generation error: {str(e)}")
+        print(f"❌ LLM generation error with {model}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         response_text = "I encountered an error while generating a response. Please try again."
     
     # Format sources
@@ -636,83 +667,115 @@ def generate_session_title_from_message(message: str) -> str:
     
     return cleaned_message if cleaned_message else 'New Chat'
 
-def call_together_ai(prompt: str) -> str:
-    """Call Together AI API"""
+def call_together_ai(prompt: str, model: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free") -> str:
+    """Call Together AI API with specific model"""
+    
+    print(f"🟢 Together AI - Checking configuration...")
+    
+    # ✅ CHECK IF API KEY EXISTS
+    if not config.TOGETHER_API_KEY:
+        error_msg = "Together AI API key not configured"
+        print(f"❌ {error_msg}")
+        raise Exception(error_msg)
+        
+    print(f"🟢 Together AI - API key configured: {config.TOGETHER_API_KEY[:10]}...")
+    
     headers = {
         "Authorization": f"Bearer {config.TOGETHER_API_KEY}",
         "Content-Type": "application/json"
     }
     
     data = {
-        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
+        "model": model,  # Use the specific model passed in
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": config.MAX_TOKENS,
         "temperature": 0.7,
         "top_p": 0.9
     }
     
+    print(f"🟢 Together AI - Request data: {json.dumps(data, indent=2)}")
+    
     try:
+        print(f"🟢 Together AI - Making API request...")
         response = requests.post(
             "https://api.together.xyz/v1/chat/completions",
             headers=headers,
             json=data,
             timeout=30
         )
+        
+        print(f"🟢 Together AI - Response status: {response.status_code}")
+        
         if response.status_code == 200:
             result = response.json()
-            return result['choices'][0]['message']['content'].strip()
+            content = result['choices'][0]['message']['content'].strip()
+            print(f"🟢 Together AI - Success! Response length: {len(content)}")
+            return content
         else:
-            print(f"Together AI error: {response.status_code} - {response.text}")
-            raise Exception(f"Together AI API error: {response.status_code} - {response.text}")
+            error_text = response.text
+            print(f"❌ Together AI error: {response.status_code} - {error_text}")
+            raise Exception(f"Together AI API error: {response.status_code} - {error_text}")
+            
     except Exception as e:
+        print(f"❌ Together AI request failed: {str(e)}")
         import traceback
-        print("LLM generation error:", str(e))
         traceback.print_exc()
         return "I encountered an error while generating a response. Please try again."
 
-def call_groq(prompt: str) -> str:
-    """Call Groq API"""
-    headers = {
-        "Authorization": f"Bearer {config.GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+
+def call_gemini(prompt: str, model: str = "gemini-1.5-flash") -> str:
+    """Call Google Gemini API with specific model"""
     
-    data = {
-        "messages": [
-            {
-                "role": "system", 
-                "content": "You are a helpful assistant that answers questions based on provided context."
-            },
-            {
-                "role": "user", 
-                "content": prompt
-            }
-        ],
-        "model": "mixtral-8x7b-32768",
-        "max_tokens": config.MAX_TOKENS,
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "stream": False
-    }
+    print(f"🔵 Gemini - Starting request with model: {model}")
     
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers=headers,
-        json=data,
-        timeout=30
-    )
+    # ✅ CHECK IF API KEY EXISTS
+    if not hasattr(config, 'GEMINI_API_KEY') or not config.GEMINI_API_KEY:
+        error_msg = "Gemini API key not configured"
+        print(f"❌ {error_msg}")
+        raise Exception(error_msg)
     
-    if response.status_code == 200:
-        result = response.json()
-        return result['choices'][0]['message']['content'].strip()
-    else:
-        print(f"Groq error: {response.status_code} - {response.text}")
-        raise Exception(f"Groq API error: {response.status_code}")
+    print(f"🔵 Gemini - API key configured: {config.GEMINI_API_KEY[:10]}...")
+    
+    try:
+        print(f"🔵 Gemini - Importing google.generativeai...")
+        import google.generativeai as genai
+        
+        print(f"🔵 Gemini - Configuring API...")
+        # Configure Gemini with API key
+        genai.configure(api_key=config.GEMINI_API_KEY)
+        
+        print(f"🔵 Gemini - Creating model instance: {model}")
+        # Create model instance with specific model
+        model_instance = genai.GenerativeModel(model)
+        
+        print(f"🔵 Gemini - Generating content...")
+        print(f"🔵 Gemini - Prompt length: {len(prompt)}")
+        
+        # Generate response
+        response = model_instance.generate_content(prompt)
+        
+        print(f"🔵 Gemini - Raw response: {response}")
+        
+        if hasattr(response, 'text') and response.text:
+            content = response.text.strip()
+            print(f"🔵 Gemini - Success! Response length: {len(content)}")
+            return content
+        else:
+            error_msg = f"Gemini returned empty response: {response}"
+            print(f"❌ {error_msg}")
+            raise Exception(error_msg)
+        
+    except ImportError as e:
+        error_msg = "google-generativeai library not installed. Run: pip install google-generativeai"
+        print(f"❌ Import error: {error_msg}")
+        raise Exception(error_msg)
+    except Exception as e:
+        print(f"❌ Gemini request failed: {str(e)}")
+        print(f"❌ Gemini error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
+        raise Exception(f"Gemini API error: {str(e)}")
+
 
 def get_messages_handler(event: Dict, context) -> Dict:
     """Get chat history"""
@@ -818,6 +881,9 @@ def handler_router(event: Dict, context):
         elif path.startswith('/chat/sessions/') and not path.endswith('/messages') and not path.endswith('/export') and not path.endswith('/auto-title') and method == 'DELETE':
             print("Routing to delete_session_handler")
             return delete_session_handler(event, context)
+        elif path == '/test/models' and method == 'GET':
+            print("Routing to test_models_handler")
+            return test_models_handler(event, context)
         elif path == '/test/auth' and method == 'GET':
             print("Routing to test_auth_handler")
             return test_auth_handler(event, context)
@@ -830,3 +896,73 @@ def handler_router(event: Dict, context):
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Internal server error')
+    
+def test_models_handler(event: Dict, context) -> Dict:
+    """Test endpoint to verify all models are working"""
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        
+        test_prompt = "Hello, please respond with 'Test successful' if you can understand this message."
+        test_results = {}
+        
+        print(f"🧪 Testing models for user: {user_id}")
+        
+        # Test Together AI models
+        together_models = [
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            "meta-llama/Llama-3.1-8B-Instruct-Turbo"
+        ]
+        
+        for model in together_models:
+            try:
+                print(f"🟢 Testing Together AI model: {model}")
+                response = call_together_ai(test_prompt, model)
+                test_results[f"together-{model}"] = {
+                    "status": "success",
+                    "response": response[:100] + "..." if len(response) > 100 else response
+                }
+                print(f"✅ Together AI {model}: SUCCESS")
+            except Exception as e:
+                print(f"❌ Together AI {model}: FAILED - {str(e)}")
+                test_results[f"together-{model}"] = {
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        # Test Gemini models
+        gemini_models = [
+            "gemini-1.5-flash",
+            "gemini-1.5-pro"
+        ]
+        
+        for model in gemini_models:
+            try:
+                print(f"🔵 Testing Gemini model: {model}")
+                response = call_gemini(test_prompt, model)
+                test_results[f"gemini-{model}"] = {
+                    "status": "success", 
+                    "response": response[:100] + "..." if len(response) > 100 else response
+                }
+                print(f"✅ Gemini {model}: SUCCESS")
+            except Exception as e:
+                print(f"❌ Gemini {model}: FAILED - {str(e)}")
+                test_results[f"gemini-{model}"] = {
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        return create_success_response({
+            "test_results": test_results,
+            "config_check": {
+                "together_api_key_exists": bool(getattr(config, 'TOGETHER_API_KEY', None)),
+                "gemini_api_key_exists": bool(getattr(config, 'GEMINI_API_KEY', None)),
+                "together_key_preview": config.TOGETHER_API_KEY[:10] + "..." if getattr(config, 'TOGETHER_API_KEY', None) else "NOT SET",
+                "gemini_key_preview": config.GEMINI_API_KEY[:10] + "..." if getattr(config, 'GEMINI_API_KEY', None) else "NOT SET"
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Model test error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, f'Model test failed: {str(e)}')
