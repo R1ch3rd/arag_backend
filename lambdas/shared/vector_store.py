@@ -43,61 +43,101 @@ class VectorStore:
             raise
     
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Hugging Face Inference API"""
+        """Generate embeddings using Hugging Face Inference API with debugging"""
         if not texts:
             return []
         
+        print(f"Generating embeddings for {len(texts)} texts")
         headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
         
         # Batch texts if too many (HF API has limits)
         all_embeddings = []
         batch_size = 10  # Process 10 texts at a time
+        failed_batches = 0
         
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(texts) + batch_size - 1) // batch_size
+            
+            print(f"Processing batch {batch_num}/{total_batches} ({len(batch)} texts)")
+            
+            # Check for potentially problematic text
+            for j, text in enumerate(batch):
+                if len(text.strip()) == 0:
+                    print(f"WARNING: Empty text in batch {batch_num}, position {j}")
+                elif len(text) > 8000:  # Very long text might cause issues
+                    print(f"WARNING: Very long text in batch {batch_num}, position {j}: {len(text)} chars")
             
             try:
+                # Try with "sentences" first (based on your error)
                 response = requests.post(
                     f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}",
                     headers=headers,
-                    json={"inputs": batch, "options": {"wait_for_model": True}},
-                    timeout=30
+                    json={"sentences": batch, "options": {"wait_for_model": True}},
+                    timeout=60
                 )
                 
+                if response.status_code == 400 and "inputs" in response.text:
+                    # Fallback to "inputs" format if needed
+                    response = requests.post(
+                        f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}",
+                        headers=headers,
+                        json={"inputs": batch, "options": {"wait_for_model": True}},
+                        timeout=60
+                    )
+                
                 if response.status_code != 200:
-                    print(f"Embedding API error: {response.status_code} - {response.text}")
-                    # Fallback to random embeddings for testing
+                    print(f"Embedding API error for batch {batch_num}: {response.status_code} - {response.text}")
+                    failed_batches += 1
+                    # Fallback to random embeddings for this batch
                     import random
-                    return [[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in texts]
+                    batch_embeddings = [[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in batch]
+                    all_embeddings.extend(batch_embeddings)
+                    continue
                 
                 embeddings = response.json()
                 
                 # Handle different response formats
                 if isinstance(embeddings, list) and len(embeddings) > 0:
                     if isinstance(embeddings[0], list):
+                        # Multiple embeddings returned
+                        print(f"Batch {batch_num}: received {len(embeddings)} embeddings")
                         all_embeddings.extend(embeddings)
                     else:
-                        # Single embedding returned
+                        # Single embedding returned (shouldn't happen with batch)
+                        print(f"Batch {batch_num}: received single embedding")
                         all_embeddings.append(embeddings)
                 else:
-                    print(f"Unexpected embedding response format: {embeddings}")
+                    print(f"Batch {batch_num}: unexpected response format: {type(embeddings)}")
+                    failed_batches += 1
                     import random
-                    all_embeddings.extend([[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in batch])
-                    
+                    batch_embeddings = [[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in batch]
+                    all_embeddings.extend(batch_embeddings)
+                        
             except Exception as e:
-                print(f"Error generating embeddings: {str(e)}")
+                print(f"Error generating embeddings for batch {batch_num}: {str(e)}")
+                failed_batches += 1
                 # Generate random embeddings as fallback
                 import random
-                all_embeddings.extend([[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in batch])
+                batch_embeddings = [[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in batch]
+                all_embeddings.extend(batch_embeddings)
         
+        print(f"Embedding generation complete: {len(all_embeddings)} embeddings, {failed_batches} failed batches")
         return all_embeddings
     
     def upsert_chunks(self, user_id: str, document_id: str, 
-                     chunks: List[Dict[str, str]], embeddings: List[List[float]]):
-        """Store document chunks with embeddings in Pinecone"""
+                 chunks: List[Dict[str, str]], embeddings: List[List[float]]):
+        """Store document chunks with embeddings in Pinecone with debugging"""
         if not chunks or not embeddings:
             print("No chunks or embeddings to upsert")
             return
+        
+        if len(chunks) != len(embeddings):
+            print(f"ERROR: Chunk count ({len(chunks)}) != embedding count ({len(embeddings)})")
+            return
+        
+        print(f"Upserting {len(chunks)} chunks for document {document_id}")
         
         vectors = []
         
@@ -107,14 +147,20 @@ class VectorStore:
                 f"{user_id}:{document_id}:{i}".encode()
             ).hexdigest()
             
-            # Prepare metadata
+            # Check embedding validity
+            if not embedding or len(embedding) != config.EMBEDDING_DIMENSION:
+                print(f"ERROR: Invalid embedding at position {i}: {len(embedding) if embedding else 0} dimensions")
+                continue
+            
+            # Prepare metadata - be careful about size limits
+            chunk_text_preview = chunk['text'][:1000]  # Pinecone metadata limits
             metadata = {
                 'user_id': user_id,
                 'document_id': document_id,
-                'chunk_text': chunk['text'][:1000],  # Limit text size
+                'chunk_text': chunk_text_preview,
                 'chunk_position': i,
-                's3_key': chunk.get('s3_key', ''),
-                'word_count': chunk.get('word_count', 0)
+                'word_count': chunk.get('word_count', 0),
+                'full_text_length': len(chunk['text'])  # Track if text was truncated
             }
             
             vectors.append({
@@ -123,28 +169,45 @@ class VectorStore:
                 'metadata': metadata
             })
         
+        print(f"Prepared {len(vectors)} valid vectors for upsert")
+        
         # Upsert in batches of 100 (Pinecone limit)
         batch_size = 100
+        successful_batches = 0
+        failed_batches = 0
+        
         for i in range(0, len(vectors), batch_size):
             batch = vectors[i:i+batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(vectors) + batch_size - 1) // batch_size
+            
             try:
-                self.index.upsert(vectors=batch, namespace=user_id)
-                print(f"Upserted {len(batch)} vectors for document {document_id}")
+                print(f"Upserting batch {batch_num}/{total_batches} ({len(batch)} vectors)")
+                upsert_response = self.index.upsert(vectors=batch, namespace=user_id)
+                print(f"Batch {batch_num} upsert response: {upsert_response}")
+                successful_batches += 1
             except Exception as e:
-                print(f"Error upserting vectors: {str(e)}")
-                raise
+                print(f"Error upserting batch {batch_num}: {str(e)}")
+                failed_batches += 1
+        
+        print(f"Upsert complete: {successful_batches} successful batches, {failed_batches} failed batches")
     
     def search(self, user_id: str, query_embedding: List[float], 
-              document_ids: List[str], top_k: int = 5) -> List[Dict]:
-        """Search for similar chunks within user's documents"""
+          document_ids: List[str], top_k: int = 5) -> List[Dict]:
+        """Search for similar chunks within user's documents with debugging"""
         if not query_embedding or not document_ids:
+            print("Empty query embedding or document IDs for search")
             return []
+        
+        print(f"Searching for user {user_id} in documents {document_ids}, top_k={top_k}")
         
         try:
             # Create filter for specific documents
             metadata_filter = {
                 "document_id": {"$in": document_ids}
             }
+            
+            print(f"Using filter: {metadata_filter}")
             
             # Query Pinecone
             results = self.index.query(
@@ -155,21 +218,32 @@ class VectorStore:
                 include_metadata=True
             )
             
+            print(f"Pinecone returned {len(results.get('matches', []))} matches")
+            
             # Format results
             formatted_results = []
-            for match in results.get('matches', []):
+            for i, match in enumerate(results.get('matches', [])):
+                score = float(match.get('score', 0))
+                position = match['metadata'].get('chunk_position', 0)
+                chunk_text = match['metadata'].get('chunk_text', '')
+                
+                print(f"Match {i+1}: score={score:.4f}, position={position}, text_length={len(chunk_text)}")
+                
                 formatted_results.append({
                     'document_id': match['metadata'].get('document_id'),
-                    'chunk_text': match['metadata'].get('chunk_text', ''),
-                    'score': float(match.get('score', 0)),
-                    'position': match['metadata'].get('chunk_position', 0),
-                    's3_key': match['metadata'].get('s3_key', '')
+                    'chunk_text': chunk_text,
+                    'score': score,
+                    'position': position,
+                    's3_key': match['metadata'].get('s3_key', ''),
+                    'word_count': match['metadata'].get('word_count', 0)
                 })
             
             return formatted_results
             
         except Exception as e:
             print(f"Error searching vectors: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def delete_document_vectors(self, user_id: str, document_id: str):

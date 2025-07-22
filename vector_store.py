@@ -91,9 +91,7 @@ class VectorStore:
     
     def delete_document_vectors(self, user_id: str, document_id: str):
         """Delete all vectors for a document"""
-        # Pinecone doesn't support metadata-based deletion in free tier
-        # Would need to track vector IDs separately
-        # For now, we'll mark documents as inactive instead
+
         pass
 
 vector_store = VectorStore()

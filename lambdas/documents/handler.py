@@ -5,6 +5,7 @@ import json
 import base64
 import uuid
 import boto3
+from shared import config
 from typing import Dict
 import traceback
 from datetime import datetime
@@ -135,16 +136,110 @@ def upload_handler(event: Dict, context) -> Dict:
                 pass
             return create_response(500, {'error': 'Failed to save document metadata'})
         
-        # Extract text and chunk the document
+        # Extract text
         text = extract_text_from_file(file_content, filename)
-        chunks = chunk_text(text)  # Each chunk['text'] is plain text
-        
-        # Generate embeddings for each chunk
-        chunk_texts = [chunk['text'] for chunk in chunks]
-        embeddings = vector_store.generate_embeddings(chunk_texts)
 
-        # Upsert to Pinecone
+        # 🔍 GENERIC DOCUMENT COVERAGE DEBUG
+        print(f"=== DOCUMENT COVERAGE DEBUG ===")
+        print(f"Full extracted text length: {len(text)} characters")
+        print(f"Word count: {len(text.split())} words")
+
+        # Show document structure: beginning, middle, end
+        text_length = len(text)
+        sections = {
+            'beginning': text[:min(300, text_length//3)],
+            'middle': text[text_length//3:2*text_length//3][:300] if text_length > 900 else text[text_length//3:2*text_length//3],
+            'end': text[max(0, text_length-300):]
+        }
+
+        print(f"Document sections preview:")
+        for section_name, section_text in sections.items():
+            print(f"  {section_name.upper()}: {section_text[:200]}...")
+            print()
+
+        # Chunk the text
+        chunks = chunk_text(text)
+        print(f"Created {len(chunks)} total chunks")
+
+        if not chunks:
+            print("❌ ERROR: No chunks created!")
+            return create_response(500, {'error': 'No chunks created from document'})
+
+        # Analyze chunk distribution across document
+        chunk_positions = []
+        for i, chunk in enumerate(chunks):
+            chunk_start_in_text = text.find(chunk['text'][:50])
+            if chunk_start_in_text != -1:
+                position_percentage = (chunk_start_in_text / text_length) * 100
+                chunk_positions.append((i, position_percentage))
+            else:
+                chunk_positions.append((i, -1))
+
+        print(f"Chunk position distribution:")
+        beginning_chunks = sum(1 for _, pos in chunk_positions if 0 <= pos < 33)
+        middle_chunks = sum(1 for _, pos in chunk_positions if 33 <= pos < 67)
+        end_chunks = sum(1 for _, pos in chunk_positions if 67 <= pos <= 100)
+        unknown_chunks = sum(1 for _, pos in chunk_positions if pos == -1)
+
+        print(f"  Beginning (0-33%): {beginning_chunks} chunks")
+        print(f"  Middle (33-67%): {middle_chunks} chunks")
+        print(f"  End (67-100%): {end_chunks} chunks")
+        print(f"  Unknown position: {unknown_chunks} chunks")
+
+        # Show details of first and last few chunks
+        print(f"First 2 chunks:")
+        for i in range(min(2, len(chunks))):
+            chunk = chunks[i]
+            print(f"  Chunk {i}: {len(chunk['text'])} chars, {chunk.get('word_count', len(chunk['text'].split()))} words")
+            print(f"    Preview: {chunk['text'][:150]}...")
+            print()
+
+        print(f"Last 2 chunks:")
+        for i in range(max(0, len(chunks)-2), len(chunks)):
+            chunk = chunks[i]
+            estimated_pos = next((pos for chunk_i, pos in chunk_positions if chunk_i == i), -1)
+            print(f"  Chunk {i}: {len(chunk['text'])} chars, {chunk.get('word_count', len(chunk['text'].split()))} words")
+            print(f"    Estimated position: {estimated_pos:.1f}% of document" if estimated_pos != -1 else "    Position: unknown")
+            print(f"    Preview: {chunk['text'][:150]}...")
+            print(f"    End: ...{chunk['text'][-100:]}")
+            print()
+
+        # Generate embeddings
+        chunk_texts = [chunk['text'] for chunk in chunks]
+        print(f"Generating embeddings for {len(chunk_texts)} chunks...")
+
+        embeddings = vector_store.generate_embeddings(chunk_texts)
+        print(f"Generated {len(embeddings)} embeddings")
+
+        # Check embedding quality across document sections
+        embedding_quality = []
+        for i, embedding in enumerate(embeddings):
+            if embedding and len(embedding) > 10:
+                sample_values = embedding[:20]
+                value_variance = max(sample_values) - min(sample_values)
+                embedding_quality.append((i, value_variance))
+            else:
+                embedding_quality.append((i, -1))  # Invalid embedding
+
+        # Group by document position
+        beginning_quality = [qual for i, qual in embedding_quality if any(chunk_i == i and 0 <= pos < 33 for chunk_i, pos in chunk_positions)]
+        end_quality = [qual for i, qual in embedding_quality if any(chunk_i == i and 67 <= pos <= 100 for chunk_i, pos in chunk_positions)]
+
+        print(f"Embedding quality analysis:")
+        print(f"  Beginning chunks - avg quality: {sum(beginning_quality)/len(beginning_quality) if beginning_quality else 0:.4f}")
+        print(f"  End chunks - avg quality: {sum(end_quality)/len(end_quality) if end_quality else 0:.4f}")
+
+        # Check for failed embeddings
+        failed_embeddings = [i for i, qual in embedding_quality if qual <= 0]
+        if failed_embeddings:
+            print(f"  ⚠️  WARNING: {len(failed_embeddings)} chunks have failed/poor embeddings: {failed_embeddings}")
+
+        print(f"=== END DOCUMENT COVERAGE DEBUG ===")
+
+        # Continue with storage
         vector_store.upsert_chunks(user_id, document_id, chunks, embeddings)
+        
+        print("=== END UPLOAD DEBUG ===")
         
         return create_response(200, {
             'document_id': document_id,

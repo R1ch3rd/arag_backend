@@ -285,37 +285,3 @@ class DynamoDBClient:
         return filtered_sessions[:limit]
 
 db = DynamoDBClient()
-
-# def create_session_handler(event: Dict, context) -> Dict:
-#     """Create new chat session"""
-#     try:
-#         user_id = event['requestContext']['authorizer']['claims']['sub']
-#         body = json.loads(event['body'])
-        
-#         # Get active documents
-#         document_ids = body.get('document_ids', [])
-#         if not document_ids:
-#             docs = db.list_user_documents(user_id)
-#             document_ids = [d['document_id'] for d in docs if d.get('active') and d.get('document_id')]
-        
-#         if not document_ids:
-#             print("No active documents found for user:", user_id)
-#             return create_error_response(400, 'No active documents')
-        
-#         print("Creating session for user:", user_id)
-#         print("Document IDs:", document_ids)
-        
-#         # Create session
-#         session_id = db.create_session(user_id, document_ids)
-        
-#         print("Session created with ID:", session_id)
-#         return create_success_response({
-#             'session_id': session_id,
-#             'document_ids': document_ids
-#         })
-        
-#     except Exception as e:
-#         import traceback
-#         print(f"Create session error: {str(e)}")
-#         traceback.print_exc()
-#         return create_error_response(500, 'Failed to create session')

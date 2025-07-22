@@ -11,6 +11,90 @@ from decimal import Decimal
 from shared.utils import generate_response_prompt, create_success_response, create_error_response
 from datetime import datetime
 
+def enhanced_search_strategy(user_id: str, query: str, query_embedding: List[float], document_ids: List[str]):
+    """Enhanced search strategy to get better document coverage"""
+    
+    print(f"🔍 Enhanced search for query: '{query}'")
+    
+    # Step 1: Get more results initially
+    initial_results = vector_store.search(
+        user_id, 
+        query_embedding, 
+        document_ids, 
+        top_k=30  # Get many results initially
+    )
+    
+    print(f"Initial search returned {len(initial_results)} results")
+    
+    if not initial_results:
+        return []
+    
+    # Step 2: Analyze position distribution
+    positions = [(r.get('position', -1), r) for r in initial_results if r.get('position', -1) >= 0]
+    positions.sort(key=lambda x: x[0])  # Sort by position
+    
+    if not positions:
+        # Fallback to score-based selection
+        return sorted(initial_results, key=lambda x: x.get('score', 0), reverse=True)[:10]
+    
+    print(f"Position range: {positions[0][0]} to {positions[-1][0]}")
+    
+    # Step 3: Ensure diverse position coverage
+    selected_results = []
+    
+    # Always include top scorer
+    best_result = max(initial_results, key=lambda x: x.get('score', 0))
+    selected_results.append(best_result)
+    print(f"Added best scorer: position {best_result.get('position', -1)}, score {best_result.get('score', 0):.4f}")
+    
+    # Divide document into sections and get best from each
+    if len(positions) > 1:
+        min_pos = positions[0][0]
+        max_pos = positions[-1][0]
+        position_range = max_pos - min_pos
+        
+        if position_range > 0:
+            # Create 3 sections: beginning, middle, end
+            section_size = position_range / 3
+            sections = [
+                (min_pos, min_pos + section_size),  # Beginning
+                (min_pos + section_size, min_pos + 2 * section_size),  # Middle  
+                (min_pos + 2 * section_size, max_pos)  # End
+            ]
+            
+            for i, (section_start, section_end) in enumerate(sections):
+                section_name = ["beginning", "middle", "end"][i]
+                section_results = [
+                    result for pos, result in positions 
+                    if section_start <= pos <= section_end
+                ]
+                
+                if section_results:
+                    # Get best result from this section
+                    best_in_section = max(section_results, key=lambda x: x.get('score', 0))
+                    
+                    # Only add if not already included and meets minimum score threshold
+                    if (best_in_section not in selected_results and 
+                        best_in_section.get('score', 0) > 0.1):  # Minimum relevance threshold
+                        selected_results.append(best_in_section)
+                        print(f"Added from {section_name}: position {best_in_section.get('position', -1)}, score {best_in_section.get('score', 0):.4f}")
+    
+    # Step 4: Fill remaining slots with highest scores
+    remaining_slots = 10 - len(selected_results)
+    if remaining_slots > 0:
+        remaining_results = [
+            r for r in initial_results 
+            if r not in selected_results and r.get('score', 0) > 0.1
+        ]
+        remaining_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        
+        for result in remaining_results[:remaining_slots]:
+            selected_results.append(result)
+            print(f"Added by score: position {result.get('position', -1)}, score {result.get('score', 0):.4f}")
+    
+    print(f"Final selection: {len(selected_results)} results")
+    return selected_results
+
 def create_session_handler(event: Dict, context) -> Dict:
     """Create new chat session and clear user cache - ENHANCED WITH DEBUGGING"""
     try:
@@ -222,14 +306,13 @@ def list_sessions_handler(event: Dict, context) -> Dict:
         return create_error_response(500, 'Failed to list sessions')
 
 def chat_handler(event: Dict, context) -> Dict:
-    """Handle chat message with DYNAMIC model selection"""
+    """Handle chat message with ENHANCED SEARCH STRATEGY"""
     try:
         user_id = event['requestContext']['authorizer']['claims']['sub']
         session_id = event['pathParameters']['session_id']
         body = json.loads(event['body'])
         query = body['message']
         
-        # ✅ GET MODEL FROM REQUEST (not config!)
         selected_model = body.get('model', 'together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free')
         
         print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
@@ -240,7 +323,7 @@ def chat_handler(event: Dict, context) -> Dict:
         if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
             return create_error_response(429, 'Chat rate limit exceeded')
         
-        # ✅ MODEL-SPECIFIC CACHE KEY
+        # Check cache
         cache_key = f"{query}_{selected_model}"
         cached_result = cache.get_cached_query(user_id, cache_key)
         
@@ -261,26 +344,35 @@ def chat_handler(event: Dict, context) -> Dict:
         # Generate query embedding
         query_embedding = vector_store.generate_embeddings([query])[0]
         
-        # Search vectors
-        search_results = vector_store.search(
-            user_id, 
-            query_embedding, 
-            session['document_set'], 
-            config.TOP_K_RESULTS
+        # 🔥 REPLACE THE OLD SEARCH WITH ENHANCED SEARCH:
+        # OLD CODE (replace this):
+        # search_results = vector_store.search(
+        #     user_id, 
+        #     query_embedding, 
+        #     session['document_set'], 
+        #     config.TOP_K_RESULTS
+        # )
+        
+        # NEW CODE (use this instead):
+        search_results = enhanced_search_strategy(
+            user_id,
+            query,
+            query_embedding,
+            session['document_set']
         )
         
         if not search_results:
             response_text = "I couldn't find relevant information in your documents to answer this question."
             sources = []
         else:
-            # ✅ GENERATE RESPONSE WITH SELECTED MODEL
+            # Generate response with selected model
             response_text, sources = generate_llm_response(query, search_results, selected_model)
         
         # Store messages in database
         db.add_message(user_id, session_id, 'user', query)
         db.add_message(user_id, session_id, 'assistant', response_text, sources)
         
-        # ✅ CACHE WITH MODEL-SPECIFIC KEY
+        # Cache result
         result = {
             'response': response_text,
             'sources': sources,
@@ -302,7 +394,7 @@ def chat_handler(event: Dict, context) -> Dict:
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Failed to process message')
-
+    
 def get_cache_stats_handler(event: Dict, context) -> Dict:
     """Get user's cache statistics"""
     try:
@@ -444,9 +536,9 @@ def generate_llm_response(query: str, contexts: List[Dict], model: str = None) -
             response_text = call_together_ai(prompt, model_name)
             
         elif model.startswith("gemini-"):
-            # Extract model name: "gemini-1.5-flash" → "1.5-flash"
+            
             model_name = model.replace("gemini-", "")
-            # But we need to add "gemini-" back for the actual API call
+            
             actual_model_name = f"gemini-{model_name}"
             print(f"🔵 Using Gemini with model: {actual_model_name}")
             response_text = call_gemini(prompt, actual_model_name)
@@ -723,7 +815,7 @@ def call_together_ai(prompt: str, model: str = "meta-llama/Llama-3.3-70B-Instruc
         return "I encountered an error while generating a response. Please try again."
 
 
-def call_gemini(prompt: str, model: str = "gemini-1.5-flash") -> str:
+def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
     """Call Google Gemini API with specific model"""
     
     print(f"🔵 Gemini - Starting request with model: {model}")
@@ -897,72 +989,72 @@ def handler_router(event: Dict, context):
         traceback.print_exc()
         return create_error_response(500, 'Internal server error')
     
-def test_models_handler(event: Dict, context) -> Dict:
-    """Test endpoint to verify all models are working"""
-    try:
-        user_id = event['requestContext']['authorizer']['claims']['sub']
+# def test_models_handler(event: Dict, context) -> Dict:
+#     """Test endpoint to verify all models are working"""
+#     try:
+#         user_id = event['requestContext']['authorizer']['claims']['sub']
         
-        test_prompt = "Hello, please respond with 'Test successful' if you can understand this message."
-        test_results = {}
+#         test_prompt = "Hello, please respond with 'Test successful' if you can understand this message."
+#         test_results = {}
         
-        print(f"🧪 Testing models for user: {user_id}")
+#         print(f"🧪 Testing models for user: {user_id}")
         
-        # Test Together AI models
-        together_models = [
-            "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            "meta-llama/Llama-3.1-8B-Instruct-Turbo"
-        ]
+#         # Test Together AI models
+#         together_models = [
+#             "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+#             "meta-llama/Llama-3.1-8B-Instruct-Turbo"
+#         ]
         
-        for model in together_models:
-            try:
-                print(f"🟢 Testing Together AI model: {model}")
-                response = call_together_ai(test_prompt, model)
-                test_results[f"together-{model}"] = {
-                    "status": "success",
-                    "response": response[:100] + "..." if len(response) > 100 else response
-                }
-                print(f"✅ Together AI {model}: SUCCESS")
-            except Exception as e:
-                print(f"❌ Together AI {model}: FAILED - {str(e)}")
-                test_results[f"together-{model}"] = {
-                    "status": "error",
-                    "error": str(e)
-                }
+#         for model in together_models:
+#             try:
+#                 print(f"🟢 Testing Together AI model: {model}")
+#                 response = call_together_ai(test_prompt, model)
+#                 test_results[f"together-{model}"] = {
+#                     "status": "success",
+#                     "response": response[:100] + "..." if len(response) > 100 else response
+#                 }
+#                 print(f"✅ Together AI {model}: SUCCESS")
+#             except Exception as e:
+#                 print(f"❌ Together AI {model}: FAILED - {str(e)}")
+#                 test_results[f"together-{model}"] = {
+#                     "status": "error",
+#                     "error": str(e)
+#                 }
         
-        # Test Gemini models
-        gemini_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro"
-        ]
+#         # Test Gemini models
+#         gemini_models = [
+#             "gemini-2.5-flash",
+#             "gemini-2.5-pro"
+#         ]
         
-        for model in gemini_models:
-            try:
-                print(f"🔵 Testing Gemini model: {model}")
-                response = call_gemini(test_prompt, model)
-                test_results[f"gemini-{model}"] = {
-                    "status": "success", 
-                    "response": response[:100] + "..." if len(response) > 100 else response
-                }
-                print(f"✅ Gemini {model}: SUCCESS")
-            except Exception as e:
-                print(f"❌ Gemini {model}: FAILED - {str(e)}")
-                test_results[f"gemini-{model}"] = {
-                    "status": "error",
-                    "error": str(e)
-                }
+#         for model in gemini_models:
+#             try:
+#                 print(f"🔵 Testing Gemini model: {model}")
+#                 response = call_gemini(test_prompt, model)
+#                 test_results[f"gemini-{model}"] = {
+#                     "status": "success", 
+#                     "response": response[:100] + "..." if len(response) > 100 else response
+#                 }
+#                 print(f"✅ Gemini {model}: SUCCESS")
+#             except Exception as e:
+#                 print(f"❌ Gemini {model}: FAILED - {str(e)}")
+#                 test_results[f"gemini-{model}"] = {
+#                     "status": "error",
+#                     "error": str(e)
+#                 }
         
-        return create_success_response({
-            "test_results": test_results,
-            "config_check": {
-                "together_api_key_exists": bool(getattr(config, 'TOGETHER_API_KEY', None)),
-                "gemini_api_key_exists": bool(getattr(config, 'GEMINI_API_KEY', None)),
-                "together_key_preview": config.TOGETHER_API_KEY[:10] + "..." if getattr(config, 'TOGETHER_API_KEY', None) else "NOT SET",
-                "gemini_key_preview": config.GEMINI_API_KEY[:10] + "..." if getattr(config, 'GEMINI_API_KEY', None) else "NOT SET"
-            }
-        })
+#         return create_success_response({
+#             "test_results": test_results,
+#             "config_check": {
+#                 "together_api_key_exists": bool(getattr(config, 'TOGETHER_API_KEY', None)),
+#                 "gemini_api_key_exists": bool(getattr(config, 'GEMINI_API_KEY', None)),
+#                 "together_key_preview": config.TOGETHER_API_KEY[:10] + "..." if getattr(config, 'TOGETHER_API_KEY', None) else "NOT SET",
+#                 "gemini_key_preview": config.GEMINI_API_KEY[:10] + "..." if getattr(config, 'GEMINI_API_KEY', None) else "NOT SET"
+#             }
+#         })
         
-    except Exception as e:
-        print(f"❌ Model test error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return create_error_response(500, f'Model test failed: {str(e)}')
+#     except Exception as e:
+#         print(f"❌ Model test error: {str(e)}")
+#         import traceback
+#         traceback.print_exc()
+#         return create_error_response(500, f'Model test failed: {str(e)}')

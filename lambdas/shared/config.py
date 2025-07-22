@@ -34,9 +34,9 @@ class Config:
     # GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
     # RAG Config
-    CHUNK_SIZE = 512
-    CHUNK_OVERLAP = 128
-    TOP_K_RESULTS = 5
+    CHUNK_SIZE = 300
+    CHUNK_OVERLAP = 75
+    TOP_K_RESULTS = 20
     MAX_TOKENS = 1000
     
     # Rate Limiting

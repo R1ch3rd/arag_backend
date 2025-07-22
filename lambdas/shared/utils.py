@@ -86,15 +86,15 @@ def extract_from_docx(content: bytes) -> str:
         print(f"DOCX extraction error: {e}")
         return "Error extracting text from DOCX"
 
-def chunk_text(text: str, chunk_size: int = 512, overlap: int = 128) -> List[Dict[str, str]]:
-    """Split text into overlapping chunks"""
-    # Clean text
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    if not text:
-        return []
-    
-    # Simple word-based chunking for now
+def get_overlap_text(text: str, overlap_words: int) -> str:
+    """Get the last N words for overlap"""
+    words = text.split()
+    if len(words) <= overlap_words:
+        return text
+    return " ".join(words[-overlap_words:])
+
+def chunk_by_words(text: str, chunk_size: int = 400, overlap: int = 100) -> List[Dict[str, str]]:
+    """Fallback word-based chunking"""
     words = text.split()
     chunks = []
     
@@ -105,11 +105,90 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 128) -> List[Dic
         chunks.append({
             'text': chunk_text,
             'word_count': len(chunk_words),
-            'start_index': i
+            'start_index': i // (chunk_size - overlap),
+            'word_start': i,
+            'word_end': i + len(chunk_words)
         })
         
         if i + chunk_size >= len(words):
             break
+    
+    return chunks
+
+def chunk_text(text: str, chunk_size: int = 400, overlap: int = 100) -> List[Dict[str, str]]:
+    """Improved text chunking with better boundary detection"""
+    
+    # Clean text
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    if not text:
+        return []
+    
+    print(f"Chunking text: {len(text)} characters, {len(text.split())} words")
+    
+ 
+    # Split into sentences using multiple delimiters
+    sentence_delimiters = r'[.!?]+\s+'
+    sentences = re.split(sentence_delimiters, text)
+    
+    # Clean up sentences
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if len(sentences) < 2:
+        # Fallback to word-based chunking if sentence detection fails
+        return chunk_by_words(text, chunk_size, overlap)
+    
+    print(f"Split into {len(sentences)} sentences")
+    
+    chunks = []
+    current_chunk = ""
+    current_word_count = 0
+    sentence_index = 0
+    
+    for i, sentence in enumerate(sentences):
+        sentence_words = len(sentence.split())
+        
+        # If adding this sentence would exceed chunk size, finalize current chunk
+        if current_word_count + sentence_words > chunk_size and current_chunk:
+            # Add current chunk
+            chunks.append({
+                'text': current_chunk.strip(),
+                'word_count': current_word_count,
+                'start_sentence': sentence_index,
+                'end_sentence': i - 1,
+                'start_index': len(chunks)  # Position in document
+            })
+            
+            # Start new chunk with overlap
+            overlap_text = get_overlap_text(current_chunk, overlap)
+            current_chunk = overlap_text + " " + sentence if overlap_text else sentence
+            current_word_count = len(current_chunk.split())
+            sentence_index = max(0, i - 1)  # Start slightly before for context
+            
+        else:
+            # Add sentence to current chunk
+            if current_chunk:
+                current_chunk += " " + sentence
+            else:
+                current_chunk = sentence
+                sentence_index = i
+            current_word_count += sentence_words
+    
+    # Add final chunk
+    if current_chunk.strip():
+        chunks.append({
+            'text': current_chunk.strip(),
+            'word_count': current_word_count,
+            'start_sentence': sentence_index,
+            'end_sentence': len(sentences) - 1,
+            'start_index': len(chunks)
+        })
+    
+    print(f"Created {len(chunks)} chunks using sentence-based splitting")
+    
+    # Debug: Print chunk distribution
+    word_counts = [c['word_count'] for c in chunks]
+    print(f"Chunk sizes - min: {min(word_counts)}, max: {max(word_counts)}, avg: {sum(word_counts)/len(word_counts):.1f}")
     
     return chunks
 
