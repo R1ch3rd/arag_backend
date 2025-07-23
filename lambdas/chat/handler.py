@@ -1,4 +1,4 @@
-# backend/lambdas/chat/handler.py
+# backend/lambdas/chat/handler.py - FIXED VERSION
 
 import json
 import requests
@@ -29,71 +29,47 @@ def enhanced_search_strategy(user_id: str, query: str, query_embedding: List[flo
     if not initial_results:
         return []
     
-    # Step 2: Analyze position distribution
-    positions = [(r.get('position', -1), r) for r in initial_results if r.get('position', -1) >= 0]
-    positions.sort(key=lambda x: x[0])  # Sort by position
+    # Step 2: Group by document and select best chunks per document
+    document_chunks = {}
+    for result in initial_results:
+        doc_id = result.get('document_id', 'unknown')
+        if doc_id not in document_chunks:
+            document_chunks[doc_id] = []
+        document_chunks[doc_id].append(result)
     
-    if not positions:
-        # Fallback to score-based selection
-        return sorted(initial_results, key=lambda x: x.get('score', 0), reverse=True)[:10]
-    
-    print(f"Position range: {positions[0][0]} to {positions[-1][0]}")
-    
-    # Step 3: Ensure diverse position coverage
+    # Step 3: Select best chunks from each document
     selected_results = []
-    
-    # Always include top scorer
-    best_result = max(initial_results, key=lambda x: x.get('score', 0))
-    selected_results.append(best_result)
-    print(f"Added best scorer: position {best_result.get('position', -1)}, score {best_result.get('score', 0):.4f}")
-    
-    # Divide document into sections and get best from each
-    if len(positions) > 1:
-        min_pos = positions[0][0]
-        max_pos = positions[-1][0]
-        position_range = max_pos - min_pos
+    for doc_id, chunks in document_chunks.items():
+        # Sort chunks by score (best first)
+        chunks.sort(key=lambda x: x.get('score', 0), reverse=True)
         
-        if position_range > 0:
-            # Create 3 sections: beginning, middle, end
-            section_size = position_range / 3
-            sections = [
-                (min_pos, min_pos + section_size),  # Beginning
-                (min_pos + section_size, min_pos + 2 * section_size),  # Middle  
-                (min_pos + 2 * section_size, max_pos)  # End
-            ]
+        # Take top 3 chunks per document, but ensure good diversity
+        doc_chunks = []
+        positions_used = set()
+        
+        for chunk in chunks:
+            position = chunk.get('position', -1)
+            score = chunk.get('score', 0)
             
-            for i, (section_start, section_end) in enumerate(sections):
-                section_name = ["beginning", "middle", "end"][i]
-                section_results = [
-                    result for pos, result in positions 
-                    if section_start <= pos <= section_end
-                ]
-                
-                if section_results:
-                    # Get best result from this section
-                    best_in_section = max(section_results, key=lambda x: x.get('score', 0))
+            # Only add if score is decent and position not too close to existing
+            if score > 0.1:  # Minimum relevance threshold
+                if position == -1 or not any(abs(position - used_pos) < 5 for used_pos in positions_used):
+                    doc_chunks.append(chunk)
+                    if position != -1:
+                        positions_used.add(position)
                     
-                    # Only add if not already included and meets minimum score threshold
-                    if (best_in_section not in selected_results and 
-                        best_in_section.get('score', 0) > 0.1):  # Minimum relevance threshold
-                        selected_results.append(best_in_section)
-                        print(f"Added from {section_name}: position {best_in_section.get('position', -1)}, score {best_in_section.get('score', 0):.4f}")
-    
-    # Step 4: Fill remaining slots with highest scores
-    remaining_slots = 10 - len(selected_results)
-    if remaining_slots > 0:
-        remaining_results = [
-            r for r in initial_results 
-            if r not in selected_results and r.get('score', 0) > 0.1
-        ]
-        remaining_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+                    if len(doc_chunks) >= 3:  # Max 3 chunks per document
+                        break
         
-        for result in remaining_results[:remaining_slots]:
-            selected_results.append(result)
-            print(f"Added by score: position {result.get('position', -1)}, score {result.get('score', 0):.4f}")
+        selected_results.extend(doc_chunks)
+        print(f"Selected {len(doc_chunks)} chunks from document {doc_id}")
     
-    print(f"Final selection: {len(selected_results)} results")
-    return selected_results
+    # Step 4: Sort final results by score and limit total
+    selected_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+    final_results = selected_results[:10]  # Max 10 total chunks
+    
+    print(f"Final selection: {len(final_results)} results from {len(document_chunks)} documents")
+    return final_results
 
 def create_session_handler(event: Dict, context) -> Dict:
     """Create new chat session and clear user cache - ENHANCED WITH DEBUGGING"""
@@ -180,7 +156,239 @@ def create_session_handler(event: Dict, context) -> Dict:
         traceback.print_exc()
         return create_error_response(500, 'Failed to create session')
 
+def chat_handler(event: Dict, context) -> Dict:
+    """Handle chat message with CONVERSATION HISTORY and GROUPED DOCUMENTS"""
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        session_id = event['pathParameters']['session_id']
+        body = json.loads(event['body'])
+        query = body['message']
+        
+        selected_model = body.get('model', 'together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free')
+        
+        print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
+        print(f"🎯 Query: {query}")
+        print(f"🤖 Selected model: {selected_model}")
+        
+        # Check rate limit
+        if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
+            return create_error_response(429, 'Chat rate limit exceeded')
+        
+        # Get session info
+        session = db.get_session(user_id, session_id)
+        if not session:
+            return create_error_response(404, f'Session not found: {session_id}')
+        
+        # 🔥 NEW: Get conversation history for context
+        previous_messages = db.get_session_messages(session_id, limit=10)  # Last 10 messages
+        
+        # Create cache key that includes conversation history
+        history_hash = hash(str([(m.get('role'), m.get('content', '')[:100]) for m in previous_messages[-6:]]))
+        cache_key = f"{query}_{selected_model}_{history_hash}"
+        
+        cached_result = cache.get_cached_query(user_id, cache_key)
+        if cached_result:
+            print(f"💾 Returning cached response for {selected_model}")
+            return create_success_response({
+                'response': cached_result['response'],
+                'sources': cached_result['sources'],
+                'cached': True,
+                'model_used': selected_model
+            })
+        
+        # Generate query embedding
+        query_embedding = vector_store.generate_embeddings([query])[0]
+        
+        # 🔥 FIXED: Use enhanced search strategy
+        search_results = enhanced_search_strategy(
+            user_id,
+            query,
+            query_embedding,
+            session['document_set']
+        )
+        
+        if not search_results:
+            response_text = "I couldn't find relevant information in your documents to answer this question."
+            sources = []
+        else:
+            # 🔥 NEW: Generate response with conversation history
+            response_text, sources = generate_llm_response_with_history(
+                query, 
+                search_results, 
+                previous_messages,
+                selected_model
+            )
+        
+        # Store messages in database
+        db.add_message(user_id, session_id, 'user', query)
+        db.add_message(user_id, session_id, 'assistant', response_text, sources)
+        
+        # Cache result
+        result = {
+            'response': response_text,
+            'sources': sources,
+            'model_used': selected_model
+        }
+        cache.cache_query_result(user_id, cache_key, result)
+        
+        print(f"✅ Response generated successfully with {selected_model}")
+        
+        return create_success_response({
+            'response': response_text,
+            'sources': sources,
+            'cached': False,
+            'model_used': selected_model
+        })
+        
+    except Exception as e:
+        print(f"❌ Chat handler error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, 'Failed to process message')
 
+def generate_llm_response_with_history(query: str, contexts: List[Dict], 
+                                     previous_messages: List[Dict], model: str = None) -> tuple:
+    """Generate response using LLM with CONVERSATION HISTORY and GROUPED SOURCES"""
+    
+    # 🔥 FIXED: Group contexts by document to avoid "multiple documents" confusion
+    document_groups = {}
+    for ctx in contexts:
+        doc_id = ctx.get('document_id', 'unknown')
+        if doc_id not in document_groups:
+            document_groups[doc_id] = {
+                'document_id': doc_id,
+                'chunks': [],
+                'best_score': 0
+            }
+        document_groups[doc_id]['chunks'].append(ctx)
+        document_groups[doc_id]['best_score'] = max(
+            document_groups[doc_id]['best_score'], 
+            ctx.get('score', 0)
+        )
+    
+    # Sort documents by best score
+    sorted_docs = sorted(document_groups.values(), key=lambda x: x['best_score'], reverse=True)
+    # Take top 3 most relevant documents
+    top_documents = sorted_docs[:3]
+    
+    # 🔥 NEW: Build conversation history
+    conversation_context = ""
+    if previous_messages:
+        conversation_context = "\n\nPrevious conversation:\n"
+        # Only include last 6 messages to avoid token limits
+        recent_messages = previous_messages[-6:]
+        for msg in recent_messages:
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')[:200]  # Truncate long messages
+            if role == 'user':
+                conversation_context += f"User: {content}\n"
+            elif role == 'assistant':
+                conversation_context += f"Assistant: {content}\n"
+    
+    # 🔥 FIXED: Build document context (grouped by document)
+    document_context = ""
+    if top_documents:
+        document_context = "\n\nRelevant information from your documents:\n\n"
+        
+        for i, doc_group in enumerate(top_documents, 1):
+            doc_id = doc_group['document_id']
+            chunks = doc_group['chunks']
+            
+            # Sort chunks by position to maintain document flow
+            chunks.sort(key=lambda x: x.get('position', 0))
+            
+            document_context += f"Document {i} (ID: {doc_id}):\n"
+            
+            # Combine chunks from same document intelligently
+            combined_text = ""
+            for chunk in chunks:
+                chunk_text = chunk.get('chunk_text', '')
+                if chunk_text and chunk_text not in combined_text:
+                    if combined_text:
+                        combined_text += " [...] "  # Indicate text continues
+                    combined_text += chunk_text
+            
+            # Limit combined text length
+            if len(combined_text) > 800:
+                combined_text = combined_text[:800] + "..."
+            
+            document_context += f"{combined_text}\n\n"
+    
+    # 🔥 IMPROVED: Create comprehensive prompt
+    prompt = f"""You are a helpful AI assistant. Based on the provided documents and conversation history, answer the user's question accurately and helpfully.
+
+{conversation_context}
+
+{document_context}
+
+Current question: {query}
+
+Instructions:
+- Answer based on the information provided in the documents
+- If the information isn't in the documents, say so clearly
+- Maintain context from the previous conversation when relevant
+- Be concise but thorough
+- Reference specific documents when appropriate
+
+Answer:"""
+    
+    # Extract provider from model string
+    if not model:
+        model = "together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+    
+    print(f"🤖 LLM Request - Full model: {model}")
+    
+    try:
+        # Dynamic routing based on model prefix
+        if model.startswith("together-"):
+            model_name = model.replace("together-", "")
+            print(f"🟢 Using Together AI with model: {model_name}")
+            response_text = call_together_ai(prompt, model_name)
+            
+        elif model.startswith("gemini-"):
+            model_name = model.replace("gemini-", "")
+            actual_model_name = f"gemini-{model_name}"
+            print(f"🔵 Using Gemini with model: {actual_model_name}")
+            response_text = call_gemini(prompt, actual_model_name)
+            
+        else:
+            print(f"⚠️ Unknown model format: {model}, using default Together AI")
+            response_text = call_together_ai(prompt, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
+            
+    except Exception as e:
+        print(f"❌ LLM generation error with {model}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        response_text = "I encountered an error while generating a response. Please try again."
+    
+    # 🔥 FIXED: Format sources by document (not individual chunks)
+    sources = []
+    for doc_group in top_documents:
+        doc_id = doc_group['document_id']
+        chunks = doc_group['chunks']
+        
+        # Create a combined preview from top chunks
+        combined_preview = ""
+        for chunk in chunks[:2]:  # Top 2 chunks per document
+            chunk_text = chunk.get('chunk_text', '')
+            if chunk_text:
+                if combined_preview:
+                    combined_preview += " ... "
+                combined_preview += chunk_text[:150]
+        
+        if len(combined_preview) > 200:
+            combined_preview = combined_preview[:200] + "..."
+        
+        sources.append({
+            'document_id': doc_id,
+            'text': combined_preview,
+            'relevance_score': doc_group['best_score'],
+            'chunk_count': len(chunks)
+        })
+    
+    return response_text, sources
+
+# Keep existing functions
 def test_auth_handler(event: Dict, context) -> Dict:
     """Test authentication and return user info"""
     try:
@@ -305,96 +513,7 @@ def list_sessions_handler(event: Dict, context) -> Dict:
         traceback.print_exc()
         return create_error_response(500, 'Failed to list sessions')
 
-def chat_handler(event: Dict, context) -> Dict:
-    """Handle chat message with ENHANCED SEARCH STRATEGY"""
-    try:
-        user_id = event['requestContext']['authorizer']['claims']['sub']
-        session_id = event['pathParameters']['session_id']
-        body = json.loads(event['body'])
-        query = body['message']
-        
-        selected_model = body.get('model', 'together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free')
-        
-        print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
-        print(f"🎯 Query: {query}")
-        print(f"🤖 Selected model: {selected_model}")
-        
-        # Check rate limit
-        if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
-            return create_error_response(429, 'Chat rate limit exceeded')
-        
-        # Check cache
-        cache_key = f"{query}_{selected_model}"
-        cached_result = cache.get_cached_query(user_id, cache_key)
-        
-        if cached_result:
-            print(f"💾 Returning cached response for {selected_model}")
-            return create_success_response({
-                'response': cached_result['response'],
-                'sources': cached_result['sources'],
-                'cached': True,
-                'model_used': selected_model
-            })
-        
-        # Get session info
-        session = db.get_session(user_id, session_id)
-        if not session:
-            return create_error_response(404, f'Session not found: {session_id}')
-        
-        # Generate query embedding
-        query_embedding = vector_store.generate_embeddings([query])[0]
-        
-        # 🔥 REPLACE THE OLD SEARCH WITH ENHANCED SEARCH:
-        # OLD CODE (replace this):
-        # search_results = vector_store.search(
-        #     user_id, 
-        #     query_embedding, 
-        #     session['document_set'], 
-        #     config.TOP_K_RESULTS
-        # )
-        
-        # NEW CODE (use this instead):
-        search_results = enhanced_search_strategy(
-            user_id,
-            query,
-            query_embedding,
-            session['document_set']
-        )
-        
-        if not search_results:
-            response_text = "I couldn't find relevant information in your documents to answer this question."
-            sources = []
-        else:
-            # Generate response with selected model
-            response_text, sources = generate_llm_response(query, search_results, selected_model)
-        
-        # Store messages in database
-        db.add_message(user_id, session_id, 'user', query)
-        db.add_message(user_id, session_id, 'assistant', response_text, sources)
-        
-        # Cache result
-        result = {
-            'response': response_text,
-            'sources': sources,
-            'model_used': selected_model
-        }
-        cache.cache_query_result(user_id, cache_key, result)
-        
-        print(f"✅ Response generated successfully with {selected_model}")
-        
-        return create_success_response({
-            'response': response_text,
-            'sources': sources,
-            'cached': False,
-            'model_used': selected_model
-        })
-        
-    except Exception as e:
-        print(f"❌ Chat handler error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return create_error_response(500, 'Failed to process message')
-    
+# Continue with rest of existing functions...
 def get_cache_stats_handler(event: Dict, context) -> Dict:
     """Get user's cache statistics"""
     try:
@@ -516,55 +635,6 @@ def export_session_handler(event: Dict, context) -> Dict:
     except Exception as e:
         print(f"Export session error: {str(e)}")
         return create_error_response(500, 'Failed to export session')
-
-def generate_llm_response(query: str, contexts: List[Dict], model: str = None) -> tuple:
-    """Generate response using LLM with DYNAMIC model selection"""
-    prompt = generate_response_prompt(query, contexts)
-    
-    # Extract provider from model string (not from static config!)
-    if not model:
-        model = "together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"  # Default
-    
-    print(f"🤖 LLM Request - Full model: {model}")
-    
-    try:
-        # ✅ DYNAMIC ROUTING based on model prefix
-        if model.startswith("together-"):
-            # Extract model name: "together-meta-llama/Llama-3.3-70B" → "meta-llama/Llama-3.3-70B"
-            model_name = model.replace("together-", "")
-            print(f"🟢 Using Together AI with model: {model_name}")
-            response_text = call_together_ai(prompt, model_name)
-            
-        elif model.startswith("gemini-"):
-            
-            model_name = model.replace("gemini-", "")
-            
-            actual_model_name = f"gemini-{model_name}"
-            print(f"🔵 Using Gemini with model: {actual_model_name}")
-            response_text = call_gemini(prompt, actual_model_name)
-            
-        else:
-            # Fallback for unknown models
-            print(f"⚠️ Unknown model format: {model}, using default Together AI")
-            response_text = call_together_ai(prompt, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
-            
-    except Exception as e:
-        print(f"❌ LLM generation error with {model}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        response_text = "I encountered an error while generating a response. Please try again."
-    
-    # Format sources
-    sources = [
-        {
-            'document_id': ctx['document_id'],
-            'text': ctx['chunk_text'][:200] + '...' if len(ctx['chunk_text']) > 200 else ctx['chunk_text'],
-            'relevance_score': ctx['score']
-        }
-        for ctx in contexts[:3]  # Top 3 sources
-    ]
-    
-    return response_text, sources
 
 def clear_cache_handler(event: Dict, context) -> Dict:
     """Clear user's cache with enhanced debugging"""
@@ -814,7 +884,6 @@ def call_together_ai(prompt: str, model: str = "meta-llama/Llama-3.3-70B-Instruc
         traceback.print_exc()
         return "I encountered an error while generating a response. Please try again."
 
-
 def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
     """Call Google Gemini API with specific model"""
     
@@ -868,7 +937,6 @@ def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
         traceback.print_exc()
         raise Exception(f"Gemini API error: {str(e)}")
 
-
 def get_messages_handler(event: Dict, context) -> Dict:
     """Get chat history"""
     try:
@@ -912,9 +980,6 @@ def get_messages_handler(event: Dict, context) -> Dict:
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Failed to get messages')
-
-
-
 
 def handler_router(event: Dict, context):
     """Route to appropriate handler based on HTTP method and path"""
@@ -988,73 +1053,3 @@ def handler_router(event: Dict, context):
         import traceback
         traceback.print_exc()
         return create_error_response(500, 'Internal server error')
-    
-# def test_models_handler(event: Dict, context) -> Dict:
-#     """Test endpoint to verify all models are working"""
-#     try:
-#         user_id = event['requestContext']['authorizer']['claims']['sub']
-        
-#         test_prompt = "Hello, please respond with 'Test successful' if you can understand this message."
-#         test_results = {}
-        
-#         print(f"🧪 Testing models for user: {user_id}")
-        
-#         # Test Together AI models
-#         together_models = [
-#             "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-#             "meta-llama/Llama-3.1-8B-Instruct-Turbo"
-#         ]
-        
-#         for model in together_models:
-#             try:
-#                 print(f"🟢 Testing Together AI model: {model}")
-#                 response = call_together_ai(test_prompt, model)
-#                 test_results[f"together-{model}"] = {
-#                     "status": "success",
-#                     "response": response[:100] + "..." if len(response) > 100 else response
-#                 }
-#                 print(f"✅ Together AI {model}: SUCCESS")
-#             except Exception as e:
-#                 print(f"❌ Together AI {model}: FAILED - {str(e)}")
-#                 test_results[f"together-{model}"] = {
-#                     "status": "error",
-#                     "error": str(e)
-#                 }
-        
-#         # Test Gemini models
-#         gemini_models = [
-#             "gemini-2.5-flash",
-#             "gemini-2.5-pro"
-#         ]
-        
-#         for model in gemini_models:
-#             try:
-#                 print(f"🔵 Testing Gemini model: {model}")
-#                 response = call_gemini(test_prompt, model)
-#                 test_results[f"gemini-{model}"] = {
-#                     "status": "success", 
-#                     "response": response[:100] + "..." if len(response) > 100 else response
-#                 }
-#                 print(f"✅ Gemini {model}: SUCCESS")
-#             except Exception as e:
-#                 print(f"❌ Gemini {model}: FAILED - {str(e)}")
-#                 test_results[f"gemini-{model}"] = {
-#                     "status": "error",
-#                     "error": str(e)
-#                 }
-        
-#         return create_success_response({
-#             "test_results": test_results,
-#             "config_check": {
-#                 "together_api_key_exists": bool(getattr(config, 'TOGETHER_API_KEY', None)),
-#                 "gemini_api_key_exists": bool(getattr(config, 'GEMINI_API_KEY', None)),
-#                 "together_key_preview": config.TOGETHER_API_KEY[:10] + "..." if getattr(config, 'TOGETHER_API_KEY', None) else "NOT SET",
-#                 "gemini_key_preview": config.GEMINI_API_KEY[:10] + "..." if getattr(config, 'GEMINI_API_KEY', None) else "NOT SET"
-#             }
-#         })
-        
-#     except Exception as e:
-#         print(f"❌ Model test error: {str(e)}")
-#         import traceback
-#         traceback.print_exc()
-#         return create_error_response(500, f'Model test failed: {str(e)}')
