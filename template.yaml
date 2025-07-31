@@ -313,12 +313,27 @@ Resources:
             RestApiId: !Ref Api
             Path: /chat/sessions/{session_id}/messages
             Method: GET
-        # OPTIONS for CORS
-        OptionsChats:
+        OptionsChatSessions:
           Type: Api
           Properties:
             RestApiId: !Ref Api
-            Path: /chat/{proxy+}
+            Path: /chat/sessions
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        OptionsChatSessionsWithId:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/{session_id}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        OptionsChatMessages:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /chat/sessions/{session_id}/messages
             Method: OPTIONS
             Auth:
               Authorizer: NONE
@@ -330,6 +345,38 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
+        OptionsDocuments:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        OptionsDocumentsUpload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/upload
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        OptionsDocumentsId:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/{document_id}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        OptionsDocumentsToggle:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/{document_id}/toggle
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE 
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable
