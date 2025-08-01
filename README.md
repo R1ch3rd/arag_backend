@@ -365,10 +365,3 @@ aws cognito-idp get-user --access-token $TOKEN
 ## 📝 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🆘 Support
-
-For support and questions:
-- **Documentation**: Check this README and code comments
-- **Issues**: Create GitHub issue with detailed description
-- **Logs**: Check CloudWatch logs for detailed error information
