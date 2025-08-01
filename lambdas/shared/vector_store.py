@@ -71,25 +71,65 @@ class VectorStore:
                     print(f"WARNING: Very long text in batch {batch_num}, position {j}: {len(text)} chars")
             
             try:
-                # Try with "sentences" first (based on your error)
-                response = requests.post(
-                    f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}",
-                    headers=headers,
-                    json={"sentences": batch, "options": {"wait_for_model": True}},
-                    timeout=60
-                )
+                # 🔥 FIX: Try multiple API formats in order of likelihood
+                response = None
                 
-                if response.status_code == 400 and "inputs" in response.text:
-                    # Fallback to "inputs" format if needed
+                # Format 1: Standard inputs format (most common)
+                try:
                     response = requests.post(
                         f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}",
                         headers=headers,
                         json={"inputs": batch, "options": {"wait_for_model": True}},
                         timeout=60
                     )
+                    if response.status_code == 200:
+                        print(f"Batch {batch_num}: Success with 'inputs' format")
+                    else:
+                        print(f"Batch {batch_num}: 'inputs' format failed: {response.status_code} - {response.text}")
+                        response = None
+                except Exception as e:
+                    print(f"Batch {batch_num}: 'inputs' format error: {e}")
+                    response = None
                 
-                if response.status_code != 200:
-                    print(f"Embedding API error for batch {batch_num}: {response.status_code} - {response.text}")
+                # Format 2: Sentences format (if inputs failed)
+                if response is None or response.status_code != 200:
+                    try:
+                        response = requests.post(
+                            f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}",
+                            headers=headers,
+                            json={"sentences": batch, "options": {"wait_for_model": True}},
+                            timeout=60
+                        )
+                        if response.status_code == 200:
+                            print(f"Batch {batch_num}: Success with 'sentences' format")
+                        else:
+                            print(f"Batch {batch_num}: 'sentences' format failed: {response.status_code} - {response.text}")
+                            response = None
+                    except Exception as e:
+                        print(f"Batch {batch_num}: 'sentences' format error: {e}")
+                        response = None
+                
+                # Format 3: Direct array format (last resort)
+                if response is None or response.status_code != 200:
+                    try:
+                        response = requests.post(
+                            f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}",
+                            headers=headers,
+                            json=batch,  # Send array directly
+                            timeout=60
+                        )
+                        if response.status_code == 200:
+                            print(f"Batch {batch_num}: Success with direct array format")
+                        else:
+                            print(f"Batch {batch_num}: Direct array format failed: {response.status_code} - {response.text}")
+                            response = None
+                    except Exception as e:
+                        print(f"Batch {batch_num}: Direct array format error: {e}")
+                        response = None
+                
+                # Check if any format worked
+                if response is None or response.status_code != 200:
+                    print(f"❌ All formats failed for batch {batch_num}")
                     failed_batches += 1
                     # Fallback to random embeddings for this batch
                     import random
@@ -103,21 +143,21 @@ class VectorStore:
                 if isinstance(embeddings, list) and len(embeddings) > 0:
                     if isinstance(embeddings[0], list):
                         # Multiple embeddings returned
-                        print(f"Batch {batch_num}: received {len(embeddings)} embeddings")
+                        print(f"✅ Batch {batch_num}: received {len(embeddings)} embeddings")
                         all_embeddings.extend(embeddings)
                     else:
                         # Single embedding returned (shouldn't happen with batch)
                         print(f"Batch {batch_num}: received single embedding")
                         all_embeddings.append(embeddings)
                 else:
-                    print(f"Batch {batch_num}: unexpected response format: {type(embeddings)}")
+                    print(f"❌ Batch {batch_num}: unexpected response format: {type(embeddings)}")
                     failed_batches += 1
                     import random
                     batch_embeddings = [[random.random() for _ in range(config.EMBEDDING_DIMENSION)] for _ in batch]
                     all_embeddings.extend(batch_embeddings)
-                        
+                            
             except Exception as e:
-                print(f"Error generating embeddings for batch {batch_num}: {str(e)}")
+                print(f"❌ Error generating embeddings for batch {batch_num}: {str(e)}")
                 failed_batches += 1
                 # Generate random embeddings as fallback
                 import random

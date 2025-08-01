@@ -179,7 +179,7 @@ Resources:
         - AttributeName: SK
           KeyType: RANGE
 
-  # Lambda Functions
+  # Lambda Functions - FIXED WITH INDIVIDUAL OPTIONS EVENTS
   DocumentUploadFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -192,6 +192,14 @@ Resources:
             RestApiId: !Ref Api
             Path: /documents/upload
             Method: POST
+        OptionsEvent:  # ✅ ADDED OPTIONS EVENT
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/upload
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
@@ -216,6 +224,14 @@ Resources:
             RestApiId: !Ref Api
             Path: /documents
             Method: GET
+        OptionsEvent:  # ✅ ADDED OPTIONS EVENT
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref DocumentsTable
@@ -232,6 +248,14 @@ Resources:
             RestApiId: !Ref Api
             Path: /documents/{document_id}/toggle
             Method: PUT
+        OptionsEvent:  # ✅ ADDED OPTIONS EVENT
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/{document_id}/toggle
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
@@ -248,13 +272,21 @@ Resources:
             RestApiId: !Ref Api
             Path: /documents/{document_id}
             Method: DELETE
+        OptionsEvent:  # ✅ ADDED OPTIONS EVENT
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/{document_id}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
         - S3CrudPolicy:
             BucketName: !Ref DocumentsBucketName
 
-  # Chat Functions - Using single handler with routing
+  # Chat Functions - CLEANED UP (REMOVED DOCUMENT OPTIONS)
   ChatRouterFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -313,6 +345,7 @@ Resources:
             RestApiId: !Ref Api
             Path: /chat/sessions/{session_id}/messages
             Method: GET
+        # OPTIONS for CHAT endpoints only
         OptionsChatSessions:
           Type: Api
           Properties:
@@ -345,38 +378,7 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
-        OptionsDocuments:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /documents
-            Method: OPTIONS
-            Auth:
-              Authorizer: NONE
-        OptionsDocumentsUpload:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /documents/upload
-            Method: OPTIONS
-            Auth:
-              Authorizer: NONE
-        OptionsDocumentsId:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /documents/{document_id}
-            Method: OPTIONS
-            Auth:
-              Authorizer: NONE
-        OptionsDocumentsToggle:
-          Type: Api
-          Properties:
-            RestApiId: !Ref Api
-            Path: /documents/{document_id}/toggle
-            Method: OPTIONS
-            Auth:
-              Authorizer: NONE 
+        # ✅ REMOVED ALL DOCUMENT OPTIONS (now handled by individual functions)
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable
@@ -384,82 +386,6 @@ Resources:
             TableName: !Ref MessagesTable
         - DynamoDBReadPolicy:
             TableName: !Ref DocumentsTable
-
-  # Keep individual functions as backup/alternatives (commented out)
-  # You can remove these if the router function works well
-  # CreateSessionFunction:
-  #   Type: AWS::Serverless::Function
-  #   Properties:
-  #     CodeUri: lambdas/
-  #     Handler: chat.handler.create_session_handler
-  #     Events:
-  #       ApiEvent:
-  #         Type: Api
-  #         Properties:
-  #           RestApiId: !Ref Api
-  #           Path: /chat/sessions
-  #           Method: POST
-  #     Policies:
-  #       - DynamoDBCrudPolicy:
-  #           TableName: !Ref SessionsTable
-  #       - DynamoDBReadPolicy:
-  #           TableName: !Ref DocumentsTable
-
-  # ListSessionsFunction:
-  #   Type: AWS::Serverless::Function
-  #   Properties:
-  #     CodeUri: lambdas/
-  #     Handler: chat.handler.list_sessions_handler
-  #     Events:
-  #       ApiEvent:
-  #         Type: Api
-  #         Properties:
-  #           RestApiId: !Ref Api
-  #           Path: /chat/sessions
-  #           Method: GET
-  #     Policies:
-  #       - DynamoDBReadPolicy:
-  #           TableName: !Ref SessionsTable
-
-  # ChatFunction:
-  #   Type: AWS::Serverless::Function
-  #   Properties:
-  #     CodeUri: lambdas/
-  #     Handler: chat.handler.chat_handler
-  #     Timeout: 60
-  #     MemorySize: 1024
-  #     Events:
-  #       ApiEvent:
-  #         Type: Api
-  #         Properties:
-  #           RestApiId: !Ref Api
-  #           Path: /chat/sessions/{session_id}/messages
-  #           Method: POST
-  #     Policies:
-  #       - DynamoDBCrudPolicy:
-  #           TableName: !Ref SessionsTable
-  #       - DynamoDBCrudPolicy:
-  #           TableName: !Ref MessagesTable
-  #       - DynamoDBReadPolicy:
-  #           TableName: !Ref DocumentsTable
-
-  # GetMessagesFunction:
-  #   Type: AWS::Serverless::Function
-  #   Properties:
-  #     CodeUri: lambdas/
-  #     Handler: chat.handler.get_messages_handler
-  #     Events:
-  #       ApiEvent:
-  #         Type: Api
-  #         Properties:
-  #           RestApiId: !Ref Api
-  #           Path: /chat/sessions/{session_id}/messages
-  #           Method: GET
-  #     Policies:
-  #       - DynamoDBReadPolicy:
-  #           TableName: !Ref SessionsTable
-  #       - DynamoDBReadPolicy:
-  #           TableName: !Ref MessagesTable
 
 Outputs:
   ApiUrl:
