@@ -67,13 +67,6 @@ The backend follows a microservices architecture using AWS Lambda functions, Dyn
 - **Background Processing**: Async document processing
 - **Batch Operations**: Efficient bulk operations
 
-### 🛠️ Advanced Features
-- **Auto-title Generation**: AI-powered chat session titles
-- **Search & Filter**: Advanced session and document search
-- **Empty Session Cleanup**: Automatic maintenance tasks
-- **Comprehensive Logging**: Detailed debug and performance logging
-- **Error Handling**: Robust error recovery and user feedback
-
 ## 🚀 Technology Stack
 
 ### Core Infrastructure
@@ -290,7 +283,6 @@ curl -X POST http://localhost:3000/documents/upload \
 
 ### Optimization Features
 - **Connection Pooling**: Reused database connections
-- **Batch Processing**: Efficient bulk operations
 - **Lazy Loading**: On-demand resource initialization
 - **Caching Strategy**: Multi-level caching with TTL
 - **Async Processing**: Background document processing
@@ -345,23 +337,3 @@ aws cognito-idp get-user --access-token $TOKEN
 - **Custom Metrics**: Performance tracking
 - **Error Tracking**: Comprehensive error logging
 - **Debug Mode**: Detailed request/response logging
-
-## 🤝 Contributing
-
-### Development Setup
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/new-feature`
-3. Install dev dependencies: `pip install -r requirements-dev.txt`
-4. Run tests: `python -m pytest`
-5. Submit pull request
-
-### Code Standards
-- **Python Style**: Follow PEP 8
-- **Type Hints**: Use type annotations
-- **Documentation**: Comprehensive docstrings
-- **Testing**: Unit tests for all functions
-- **Error Handling**: Proper exception handling
-
-## 📝 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
