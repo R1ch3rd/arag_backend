@@ -2,7 +2,7 @@
 
 import json
 import requests
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from shared.config import config
 from shared.database import db
 from shared.vector_store import vector_store
@@ -10,6 +10,7 @@ from shared.cache import cache
 from decimal import Decimal
 from shared.utils import generate_response_prompt, create_success_response, create_error_response
 from datetime import datetime
+import re
 
 def enhanced_search_strategy(user_id: str, query: str, query_embedding: List[float], document_ids: List[str]):
     """Enhanced search strategy to get better document coverage"""
@@ -156,10 +157,64 @@ def create_session_handler(event: Dict, context) -> Dict:
         traceback.print_exc()
         return create_error_response(500, 'Failed to create session')
 
+def is_quote_page_query(query: str) -> Tuple[bool, str]:
+    """
+    Detect if query is asking "which page is this quote on"
+    Returns: (is_quote_query, extracted_quote)
+    """
+    query_lower = query.lower()
+    
+    # Patterns that indicate page number queries
+    page_patterns = [
+        'which page',
+        'what page',
+        'page number',
+        'on which page',
+        'on what page',
+        'find page',
+        'locate page',
+        'where can i find',
+        'where is',
+        'locate this',
+        'find this text'
+    ]
+    
+    # Check if query contains page-related keywords
+    has_page_keyword = any(pattern in query_lower for pattern in page_patterns)
+    
+    if has_page_keyword:
+        # Try to extract quoted text using regex
+        # Look for text in double quotes
+        quoted = re.findall(r'"([^"]+)"', query)
+        if quoted and len(quoted[0]) > 10:
+            return True, quoted[0]
+        
+        # Look for text in single quotes
+        quoted = re.findall(r"'([^']+)'", query)
+        if quoted and len(quoted[0]) > 10:
+            return True, quoted[0]
+        
+        # If no quotes but has page keywords, try to extract the rest
+        for pattern in page_patterns:
+            if pattern in query_lower:
+                idx = query_lower.find(pattern)
+                # Get text after the pattern
+                potential_quote = query[idx + len(pattern):].strip()
+                
+                # Clean up common question words
+                potential_quote = re.sub(r'^(is|for|:|the|this|about)\s+', '', potential_quote, flags=re.IGNORECASE)
+                potential_quote = potential_quote.strip('?!.,;')
+                
+                # Only return if it's substantial enough
+                if len(potential_quote) > 15:
+                    return True, potential_quote
+    
+    return False, None
+
 def chat_handler(event: Dict, context) -> Dict:
     """
-    Handle chat message with HYBRID SEARCH (vector + exact match)
-    🔥 IMPROVED: Better search strategy, lower thresholds, exact matching
+    Handle chat message with HYBRID SEARCH + QUOTE-TO-PAGE detection
+    🔥 NEW: Automatically detects and handles "which page" queries
     """
     try:
         user_id = event['requestContext']['authorizer']['claims']['sub']
@@ -168,14 +223,11 @@ def chat_handler(event: Dict, context) -> Dict:
         query = body['message']
         
         selected_model = body.get('model', 'gemini-2.5-flash')
-        
-        # 🔥 NEW: Option to use hybrid search
-        use_hybrid = body.get('use_hybrid_search', True)  # Default to hybrid
+        use_hybrid = body.get('use_hybrid_search', True)
         
         print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
         print(f"🎯 Query: {query}")
         print(f"🤖 Model: {selected_model}")
-        print(f"🔍 Search mode: {'Hybrid' if use_hybrid else 'Vector only'}")
         
         # Check rate limit
         if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
@@ -185,6 +237,75 @@ def chat_handler(event: Dict, context) -> Dict:
         session = db.get_session(user_id, session_id)
         if not session:
             return create_error_response(404, f'Session not found: {session_id}')
+        
+        # 🔥 NEW: Check if this is a quote-to-page query
+        is_quote_query, extracted_quote = is_quote_page_query(query)
+        
+        if is_quote_query and extracted_quote:
+            print(f"📖 QUOTE-TO-PAGE QUERY DETECTED")
+            print(f"   Extracted quote: '{extracted_quote[:100]}...'")
+            
+            # Use the specialized quote finding function
+            result = vector_store.find_quote_page(
+                user_id,
+                extracted_quote,
+                session['document_set']
+            )
+            
+            # Format response based on result
+            if result['found']:
+                if result['confidence'] == 'exact':
+                    if len(result['page_numbers']) == 1:
+                        response_text = f'The text "{extracted_quote}" is found on **page {result["page_numbers"][0]}** in the document "{result["filename"]}".'
+                    else:
+                        pages_str = ", ".join(str(p) for p in result['page_numbers'])
+                        response_text = f'The text "{extracted_quote}" appears on multiple pages: **{pages_str}** in the document "{result["filename"]}".'
+                        
+                        if result.get('total_occurrences', 0) > len(result['page_numbers']):
+                            response_text += f' (Found {result["total_occurrences"]} total occurrences across these pages.)'
+                
+                elif result['confidence'] == 'fuzzy':
+                    page_num = result['page_numbers'][0] if result['page_numbers'] else 'unknown'
+                    response_text = f'I found similar content on **page {page_num}** in "{result["filename"]}", though it may not be an exact word-for-word match. The semantic similarity score is {result.get("semantic_score", 0):.2f}.'
+                
+                # Format sources
+                sources = []
+                for match in result['matches'][:3]:  # Top 3 matches
+                    source_info = {
+                        'document_id': match['document_id'],
+                        'filename': match.get('filename', 'Unknown'),
+                        'text': match['chunk_text'][:300] + '...',
+                        'relevance_score': 1.0 if match['match_type'] == 'exact' else match.get('score', 0.8),
+                        'exact_match': match['match_type'] == 'exact',
+                        'match_type': match['match_type']
+                    }
+                    
+                    if match.get('page_number'):
+                        source_info['pages'] = [match['page_number']]
+                    
+                    sources.append(source_info)
+            
+            else:
+                response_text = f'I couldn\'t find the text "{extracted_quote}" in your documents. It might be phrased differently, or it may not exist in the uploaded documents.'
+                sources = []
+            
+            # Store messages
+            db.add_message(user_id, session_id, 'user', query)
+            db.add_message(user_id, session_id, 'assistant', response_text, sources)
+            
+            print(f"✅ Quote-to-page query handled successfully")
+            
+            return create_success_response({
+                'response': response_text,
+                'sources': sources,
+                'query_type': 'quote_page_lookup',
+                'confidence': result.get('confidence', 'not_found'),
+                'cached': False,
+                'model_used': selected_model
+            })
+        
+        # 🔥 REGULAR CHAT FLOW (if not a quote query)
+        print(f"🔍 Search mode: {'Hybrid' if use_hybrid else 'Vector only'}")
         
         # Get conversation history
         previous_messages = db.get_session_messages(session_id, limit=10)
@@ -214,7 +335,7 @@ def chat_handler(event: Dict, context) -> Dict:
             response_text = "I encountered an error generating the search query. Please try again."
             sources = []
         else:
-            # 🔥 IMPROVED: Use hybrid search or standard search with lower threshold
+            # Use hybrid or standard search
             if use_hybrid:
                 print(f"🔍 Using hybrid search (vector + exact match)...")
                 search_results = vector_store.hybrid_search(
@@ -222,26 +343,24 @@ def chat_handler(event: Dict, context) -> Dict:
                     query,
                     query_embedding,
                     session['document_set'],
-                    top_k=15  # Get more results
+                    top_k=15
                 )
             else:
-                print(f"🔍 Using standard vector search with low threshold...")
+                print(f"🔍 Using standard vector search...")
                 search_results = vector_store.search(
                     user_id,
                     query_embedding,
                     session['document_set'],
                     top_k=15,
-                    min_score=0.0  # Accept all results, let LLM decide relevance
+                    min_score=0.0
                 )
             
             print(f"📊 Search returned {len(search_results)} results")
             
-            # Log top results
             for i, result in enumerate(search_results[:3], 1):
                 match_type = result.get('match_type', 'semantic')
                 page_info = f", page {result.get('page_number')}" if 'page_number' in result else ""
-                print(f"  {i}. [{match_type}] Score: {result['score']:.3f}, "
-                      f"Doc: {result['document_id'][:8]}...{page_info}")
+                print(f"  {i}. [{match_type}] Score: {result['score']:.3f}{page_info}")
             
             if not search_results:
                 response_text = "I couldn't find relevant information in your documents to answer this question."

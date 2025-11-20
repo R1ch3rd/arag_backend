@@ -378,7 +378,6 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
-        # ✅ REMOVED ALL DOCUMENT OPTIONS (now handled by individual functions)
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable

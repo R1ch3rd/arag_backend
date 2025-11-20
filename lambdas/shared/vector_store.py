@@ -1,5 +1,5 @@
 # backend/lambdas/shared/vector_store.py
-# REFACTORED VERSION - Fixes all identified issues
+# REFACTORED VERSION - Fixes all identified issues + HuggingFace API update
 
 from pinecone import Pinecone, ServerlessSpec
 from typing import List, Dict, Tuple, Optional
@@ -24,7 +24,7 @@ class VectorStore:
                     name=config.PINECONE_INDEX,
                     dimension=config.EMBEDDING_DIMENSION,
                     metric='cosine',
-                    spec=ServerlessSpec(cloud='aws', region='us-west-2')
+                    spec=ServerlessSpec(cloud='aws', region='us-west-1')
                 )
                 time.sleep(10)  # Wait for index to be ready
             
@@ -36,62 +36,57 @@ class VectorStore:
             raise
     
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Hugging Face API"""
+        """
+        Generate embeddings using Google Gemini Embedding API
+        """
         if not texts:
             return []
         
         print(f"🔄 Generating embeddings for {len(texts)} texts")
-        
-        if not config.HF_API_TOKEN:
-            raise Exception("HF_API_TOKEN not configured")
-        
+
+        if not config.GEMINI_API_KEY:
+            raise Exception("GEMINI_API_KEY not configured")
+
+        model = "models/text-embedding-004"
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model}:embedContent"
+
         headers = {
-            "Authorization": f"Bearer {config.HF_API_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": config.GEMINI_API_KEY,
         }
-        all_embeddings = []
-        
-        # Router endpoint URL
-        api_url = f"https://api-inference.huggingface.co/models/{config.EMBEDDING_MODEL}"
-        
-        for i, text in enumerate(texts):
-            print(f"Processing {i+1}/{len(texts)}")
-            
-            try:
-                # Send single string, not array
-                payload = {"inputs": text, "options": {"wait_for_model": True}}
-                
-                response = requests.post(
-                    api_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=60
-                )
-                
-                print(f"  Response status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    embedding = response.json()
-                    
-                    # Response should be a single embedding array
-                    if isinstance(embedding, list) and len(embedding) > 0:
-                        # Handle nested list from some models
-                        if isinstance(embedding[0], list):
-                            all_embeddings.append(embedding[0])
-                        else:
-                            all_embeddings.append(embedding)
-                        print(f"  ✅ Success")
-                    else:
-                        raise Exception(f"Unexpected format: {type(embedding)}")
-                else:
+
+        embeddings = []
+
+        try:
+            for text in texts:
+                payload = {
+                    "model": model,
+                    "content": {
+                        "parts": [{"text": text}]
+                    }
+                }
+
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+
+                print("Status:", response.status_code)
+                # print(response.text)
+
+                if response.status_code != 200:
                     raise Exception(f"API error {response.status_code}: {response.text}")
-                    
-            except Exception as e:
-                print(f"  ❌ Failed: {str(e)}")
-                raise  # Don't continue with zero vectors
-        
-        print(f"✅ Embedding generation complete: {len(all_embeddings)} embeddings")
-        return all_embeddings
+
+                data = response.json()
+
+                vector = data["embedding"]["values"]
+                embeddings.append(vector)
+
+            print(f"✅ Generated {len(embeddings)} embeddings")
+            return embeddings
+
+        except Exception as e:
+            print(f"❌ Batch embedding failed: {str(e)}")
+            raise
+
+
 
     
     def upsert_chunks(self, user_id: str, document_id: str, 
@@ -570,6 +565,145 @@ class VectorStore:
         except Exception as e:
             print(f"Error getting chunk info: {e}")
             return {'chunk_count': 0, 'sections': {}, 'exists': False}
+        
+    def find_quote_page(self, user_id: str, quote: str, document_ids: List[str]) -> Dict:
+        """
+        Find which page(s) a specific quote appears on
+        
+        Returns: {
+            'found': bool,
+            'page_numbers': List[int],
+            'document_id': str,
+            'filename': str,
+            'matches': List[Dict],
+            'confidence': str  # 'exact', 'fuzzy', or 'not_found'
+        }
+        """
+        print(f"🔍 Finding page for quote: '{quote[:100]}...'")
+        
+        # Normalize quote for better matching
+        quote_normalized = ' '.join(quote.lower().split())
+        
+        if len(quote_normalized) < 10:
+            return {
+                'found': False,
+                'page_numbers': [],
+                'confidence': 'error',
+                'message': 'Quote too short (minimum 10 characters)'
+            }
+        
+        try:
+            # Get ALL chunks from specified documents
+            results = self.index.query(
+                vector=[0.0] * config.EMBEDDING_DIMENSION,
+                namespace=user_id,
+                filter={"document_id": {"$in": document_ids}},
+                top_k=10000,
+                include_metadata=True
+            )
+            
+            exact_matches = []
+            
+            for match in results.get('matches', []):
+                metadata = match.get('metadata', {})
+                chunk_text = metadata.get('chunk_text', '')
+                chunk_normalized = ' '.join(chunk_text.lower().split())
+                
+                # Try exact match
+                if quote_normalized in chunk_normalized:
+                    overlap_ratio = len(quote_normalized) / len(chunk_normalized) if chunk_normalized else 0
+                    
+                    match_info = {
+                        'document_id': metadata.get('document_id'),
+                        'filename': metadata.get('filename', 'Unknown'),
+                        'page_number': metadata.get('page_number'),
+                        'chunk_position': metadata.get('chunk_position'),
+                        'document_section': metadata.get('document_section'),
+                        'chunk_text': chunk_text,
+                        'overlap_ratio': overlap_ratio,
+                        'match_type': 'exact'
+                    }
+                    exact_matches.append(match_info)
+                    
+                    print(f"  ✅ EXACT match: doc={metadata.get('document_id')[:8]}..., "
+                          f"page={metadata.get('page_number')}, chunk={metadata.get('chunk_position')}")
+            
+            # If exact matches found
+            if exact_matches:
+                exact_matches.sort(key=lambda x: x['overlap_ratio'], reverse=True)
+                
+                page_numbers = []
+                seen_pages = set()
+                for match in exact_matches:
+                    page = match.get('page_number')
+                    if page and page not in seen_pages:
+                        page_numbers.append(page)
+                        seen_pages.add(page)
+                
+                return {
+                    'found': True,
+                    'page_numbers': sorted(page_numbers),
+                    'document_id': exact_matches[0]['document_id'],
+                    'filename': exact_matches[0]['filename'],
+                    'matches': exact_matches[:5],  # Return top 5 matches
+                    'confidence': 'exact',
+                    'total_occurrences': len(exact_matches)
+                }
+            
+            # No exact match - try semantic search
+            print("  ⚠️  No exact match, trying semantic search...")
+            query_embedding = self.generate_embeddings([quote])[0]
+            
+            if query_embedding:
+                semantic_results = self.search(
+                    user_id, 
+                    query_embedding, 
+                    document_ids, 
+                    top_k=5, 
+                    min_score=0.4
+                )
+                
+                if semantic_results:
+                    best_match = semantic_results[0]
+                    return {
+                        'found': True,
+                        'page_numbers': [best_match.get('page_number')] if 'page_number' in best_match else [],
+                        'document_id': best_match['document_id'],
+                        'filename': best_match.get('filename', 'Unknown'),
+                        'matches': [{
+                            'document_id': best_match['document_id'],
+                            'filename': best_match.get('filename'),
+                            'page_number': best_match.get('page_number'),
+                            'chunk_text': best_match['chunk_text'][:500],
+                            'score': best_match['score'],
+                            'match_type': 'semantic'
+                        }],
+                        'confidence': 'fuzzy',
+                        'semantic_score': best_match['score']
+                    }
+            
+            # Nothing found
+            print(f"  ❌ Quote not found in {len(results.get('matches', []))} chunks")
+            return {
+                'found': False,
+                'page_numbers': [],
+                'document_id': None,
+                'filename': None,
+                'matches': [],
+                'confidence': 'not_found',
+                'message': 'Quote not found in the specified documents'
+            }
+            
+        except Exception as e:
+            print(f"❌ Error finding quote: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'found': False,
+                'page_numbers': [],
+                'confidence': 'error',
+                'error': str(e)
+            }
     
     def verify_document_coverage(self, user_id: str, document_id: str) -> Dict:
         """

@@ -25,8 +25,8 @@ class Config:
     
     # Hugging Face (for embeddings)
     HF_API_TOKEN = os.environ.get('HF_API_TOKEN')
-    EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
-    EMBEDDING_DIMENSION = 384
+    EMBEDDING_MODEL = 'text-embedding-004'
+    EMBEDDING_DIMENSION = 768
     
     # LLM (Together AI or Groq)
     LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'together')  # 'together' or 'groq'
