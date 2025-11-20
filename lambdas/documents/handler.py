@@ -10,7 +10,10 @@ from typing import Dict
 import traceback
 from datetime import datetime
 import decimal
-from shared.utils import extract_text_from_file, chunk_text, convert_decimals
+from shared.utils import (extract_text_from_file, chunk_text, convert_decimals,
+    extract_text_with_pages, 
+    chunk_pages,
+)
 from shared.vector_store import vector_store
 
 # Initialize AWS clients
@@ -51,7 +54,10 @@ def get_user_id(event: Dict) -> str:
         raise Exception("Unauthorized - invalid token")
 
 def upload_handler(event: Dict, context) -> Dict:
-    """Handle document upload - ENHANCED WITH CACHE CLEARING"""
+    """
+    Handle document upload - ENHANCED WITH PAGE TRACKING
+    🔥 UPDATED: Uses new page-aware chunking
+    """
     # Handle OPTIONS preflight request
     if event.get('httpMethod') == 'OPTIONS':
         return create_response(200, {})
@@ -60,7 +66,7 @@ def upload_handler(event: Dict, context) -> Dict:
         user_id = get_user_id(event)
         print(f"Processing upload for user: {user_id}")
         
-        # 🔥 NEW: Clear user cache at start of upload process
+        # Clear user cache at start of upload process
         print("Clearing user cache before upload...")
         cache.clear_user_cache(user_id)
         
@@ -113,154 +119,140 @@ def upload_handler(event: Dict, context) -> Dict:
             print(f"S3 upload failed: {e}")
             return create_response(500, {'error': 'Failed to upload file'})
         
-        # Save to DynamoDB using correct key schema (PK/SK)
+        # 🔥 NEW: Extract text with page numbers
+        print(f"📄 Extracting text with page tracking...")
+        pages = extract_text_with_pages(file_content, filename)
+        
+        # Log page information
+        total_pages = len(pages)
+        has_page_numbers = any(p.get('page_number') is not None for p in pages)
+        
+        print(f"📊 Extracted {total_pages} pages")
+        if has_page_numbers:
+            page_nums = [p['page_number'] for p in pages if p.get('page_number')]
+            print(f"📄 Page numbers: {min(page_nums)} to {max(page_nums)}")
+        else:
+            print(f"⚠️  No page numbers available (non-PDF format)")
+        
+        # 🔥 NEW: Chunk with page numbers preserved
+        print(f"✂️  Chunking with overlap and page tracking...")
+        chunks = chunk_pages(pages, chunk_size=400, overlap=100)
+        
+        print(f"📊 Created {len(chunks)} chunks")
+        
+        if not chunks:
+            print("❌ ERROR: No chunks created!")
+            return create_response(500, {'error': 'No chunks created from document'})
+        
+        # Analyze chunk distribution
+        if has_page_numbers:
+            page_distribution = {}
+            for chunk in chunks:
+                page = chunk.get('page_number', 'Unknown')
+                page_distribution[page] = page_distribution.get(page, 0) + 1
+            
+            print(f"📊 Chunks per page: {dict(sorted(page_distribution.items()))}")
+        
+        # Show sample chunks
+        print(f"📝 Sample chunks:")
+        for i in range(min(3, len(chunks))):
+            chunk = chunks[i]
+            page_info = f", page {chunk.get('page_number')}" if 'page_number' in chunk else ""
+            print(f"  Chunk {i}: {chunk.get('word_count', 0)} words{page_info}")
+            print(f"    Preview: {chunk['text'][:100]}...")
+        
+        # Generate embeddings
+        chunk_texts = [chunk['text'] for chunk in chunks]
+        print(f"🔄 Generating embeddings for {len(chunk_texts)} chunks...")
+        
+        embeddings = vector_store.generate_embeddings(chunk_texts)
+        print(f"✅ Generated {len(embeddings)} embeddings")
+        
+        # Check for failed embeddings
+        failed_count = sum(1 for e in embeddings if e is None)
+        if failed_count > 0:
+            print(f"⚠️  WARNING: {failed_count} embeddings failed")
+        
+        # 🔥 NEW: Pass document metadata to vector store
+        document_metadata = {
+            'filename': filename,
+            'file_size': len(file_content),
+            'total_pages': total_pages,
+            'has_page_numbers': has_page_numbers
+        }
+        
+        # Store in vector database
+        print(f"💾 Storing chunks in vector database...")
+        vector_store.upsert_chunks(
+            user_id, 
+            document_id, 
+            chunks, 
+            embeddings,
+            document_metadata  # 🔥 NEW: Pass metadata
+        )
+        
+        # 🔥 NEW: Calculate actual chunk count (excluding failed embeddings)
+        successful_chunks = len([e for e in embeddings if e is not None])
+        
+        # Save to DynamoDB
         try:
             table = dynamodb.Table(DOCUMENTS_TABLE)
             table.put_item(Item={
-                'PK': f'USER#{user_id}',           # Partition Key
-                'SK': f'DOC#{document_id}',        # Sort Key
-                'user_id': user_id,                # For easier querying
+                'PK': f'USER#{user_id}',
+                'SK': f'DOC#{document_id}',
+                'user_id': user_id,
                 'document_id': document_id,
                 'filename': filename,
                 's3_key': s3_key,
                 'file_size': len(file_content),
                 'status': 'ready',
                 'created_at': datetime.utcnow().isoformat(),
-                'active': True,  # 🔥 CHANGED: Default to active
-                'GSI1PK': f'USER#{user_id}',       # For GSI if needed
+                'active': True,
+                'chunk_count': successful_chunks,  # 🔥 NEW: Store chunk count
+                'total_pages': total_pages,  # 🔥 NEW: Store page count
+                'has_page_numbers': has_page_numbers,  # 🔥 NEW: Store page tracking flag
+                'GSI1PK': f'USER#{user_id}',
                 'entity_type': 'document'
             })
+            print(f"✅ Saved document metadata to DynamoDB")
         except Exception as e:
             print(f"DynamoDB save failed: {e}")
             traceback.print_exc()
-            # Try to cleanup S3
+            # Try to cleanup S3 and vector store
             try:
                 s3_client.delete_object(Bucket=DOCUMENTS_BUCKET, Key=s3_key)
+                vector_store.delete_document_vectors(user_id, document_id)
             except:
                 pass
             return create_response(500, {'error': 'Failed to save document metadata'})
         
-        # Extract text
-        text = extract_text_from_file(file_content, filename)
-
-        # 🔍 GENERIC DOCUMENT COVERAGE DEBUG
-        print(f"=== DOCUMENT COVERAGE DEBUG ===")
-        print(f"Full extracted text length: {len(text)} characters")
-        print(f"Word count: {len(text.split())} words")
-
-        # Show document structure: beginning, middle, end
-        text_length = len(text)
-        sections = {
-            'beginning': text[:min(300, text_length//3)],
-            'middle': text[text_length//3:2*text_length//3][:300] if text_length > 900 else text[text_length//3:2*text_length//3],
-            'end': text[max(0, text_length-300):]
-        }
-
-        print(f"Document sections preview:")
-        for section_name, section_text in sections.items():
-            print(f"  {section_name.upper()}: {section_text[:200]}...")
-            print()
-
-        # Chunk the text
-        chunks = chunk_text(text)
-        print(f"Created {len(chunks)} total chunks")
-
-        if not chunks:
-            print("❌ ERROR: No chunks created!")
-            return create_response(500, {'error': 'No chunks created from document'})
-
-        # Analyze chunk distribution across document
-        chunk_positions = []
-        for i, chunk in enumerate(chunks):
-            chunk_start_in_text = text.find(chunk['text'][:50])
-            if chunk_start_in_text != -1:
-                position_percentage = (chunk_start_in_text / text_length) * 100
-                chunk_positions.append((i, position_percentage))
-            else:
-                chunk_positions.append((i, -1))
-
-        print(f"Chunk position distribution:")
-        beginning_chunks = sum(1 for _, pos in chunk_positions if 0 <= pos < 33)
-        middle_chunks = sum(1 for _, pos in chunk_positions if 33 <= pos < 67)
-        end_chunks = sum(1 for _, pos in chunk_positions if 67 <= pos <= 100)
-        unknown_chunks = sum(1 for _, pos in chunk_positions if pos == -1)
-
-        print(f"  Beginning (0-33%): {beginning_chunks} chunks")
-        print(f"  Middle (33-67%): {middle_chunks} chunks")
-        print(f"  End (67-100%): {end_chunks} chunks")
-        print(f"  Unknown position: {unknown_chunks} chunks")
-
-        # Show details of first and last few chunks
-        print(f"First 2 chunks:")
-        for i in range(min(2, len(chunks))):
-            chunk = chunks[i]
-            print(f"  Chunk {i}: {len(chunk['text'])} chars, {chunk.get('word_count', len(chunk['text'].split()))} words")
-            print(f"    Preview: {chunk['text'][:150]}...")
-            print()
-
-        print(f"Last 2 chunks:")
-        for i in range(max(0, len(chunks)-2), len(chunks)):
-            chunk = chunks[i]
-            estimated_pos = next((pos for chunk_i, pos in chunk_positions if chunk_i == i), -1)
-            print(f"  Chunk {i}: {len(chunk['text'])} chars, {chunk.get('word_count', len(chunk['text'].split()))} words")
-            print(f"    Estimated position: {estimated_pos:.1f}% of document" if estimated_pos != -1 else "    Position: unknown")
-            print(f"    Preview: {chunk['text'][:150]}...")
-            print(f"    End: ...{chunk['text'][-100:]}")
-            print()
-
-        # Generate embeddings
-        chunk_texts = [chunk['text'] for chunk in chunks]
-        print(f"Generating embeddings for {len(chunk_texts)} chunks...")
-
-        embeddings = vector_store.generate_embeddings(chunk_texts)
-        print(f"Generated {len(embeddings)} embeddings")
-
-        # Check embedding quality across document sections
-        embedding_quality = []
-        for i, embedding in enumerate(embeddings):
-            if embedding and len(embedding) > 10:
-                sample_values = embedding[:20]
-                value_variance = max(sample_values) - min(sample_values)
-                embedding_quality.append((i, value_variance))
-            else:
-                embedding_quality.append((i, -1))  # Invalid embedding
-
-        # Group by document position
-        beginning_quality = [qual for i, qual in embedding_quality if any(chunk_i == i and 0 <= pos < 33 for chunk_i, pos in chunk_positions)]
-        end_quality = [qual for i, qual in embedding_quality if any(chunk_i == i and 67 <= pos <= 100 for chunk_i, pos in chunk_positions)]
-
-        print(f"Embedding quality analysis:")
-        print(f"  Beginning chunks - avg quality: {sum(beginning_quality)/len(beginning_quality) if beginning_quality else 0:.4f}")
-        print(f"  End chunks - avg quality: {sum(end_quality)/len(end_quality) if end_quality else 0:.4f}")
-
-        # Check for failed embeddings
-        failed_embeddings = [i for i, qual in embedding_quality if qual <= 0]
-        if failed_embeddings:
-            print(f"  ⚠️  WARNING: {len(failed_embeddings)} chunks have failed/poor embeddings: {failed_embeddings}")
-
-        print(f"=== END DOCUMENT COVERAGE DEBUG ===")
-
-        # Continue with storage
-        vector_store.upsert_chunks(user_id, document_id, chunks, embeddings)
-        
-        # 🔥 NEW: Clear cache again after successful upload
-        print("Clearing user cache after successful upload...")
+        # Clear cache again after successful upload
+        print("🧹 Clearing user cache after successful upload...")
         cache.clear_user_cache(user_id)
         
-        print("=== END UPLOAD DEBUG ===")
+        print(f"✅ Upload complete!")
+        print(f"📊 Summary:")
+        print(f"  - Document ID: {document_id}")
+        print(f"  - Filename: {filename}")
+        print(f"  - Pages: {total_pages}")
+        print(f"  - Chunks: {successful_chunks}/{len(chunks)} successful")
+        print(f"  - Has page numbers: {has_page_numbers}")
         
         return create_response(200, {
             'document_id': document_id,
             'filename': filename,
             'status': 'ready',
             'file_size': len(file_content),
-            'active': True,  # 🔥 NEW: Include active status
-            'chunk_count': len(chunks),  # 🔥 NEW: Include chunk count
+            'active': True,
+            'chunk_count': successful_chunks,
+            'total_pages': total_pages,
+            'has_page_numbers': has_page_numbers,
+            'failed_chunks': len(chunks) - successful_chunks,
             'message': 'Document uploaded successfully'
         })
         
     except Exception as e:
-        print(f"Upload error: {str(e)}")
+        print(f"❌ Upload error: {str(e)}")
         traceback.print_exc()
         return create_response(500, {'error': 'Internal server error'})
 

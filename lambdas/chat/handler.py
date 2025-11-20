@@ -157,18 +157,25 @@ def create_session_handler(event: Dict, context) -> Dict:
         return create_error_response(500, 'Failed to create session')
 
 def chat_handler(event: Dict, context) -> Dict:
-    """Handle chat message with CONVERSATION HISTORY and GROUPED DOCUMENTS"""
+    """
+    Handle chat message with HYBRID SEARCH (vector + exact match)
+    🔥 IMPROVED: Better search strategy, lower thresholds, exact matching
+    """
     try:
         user_id = event['requestContext']['authorizer']['claims']['sub']
         session_id = event['pathParameters']['session_id']
         body = json.loads(event['body'])
         query = body['message']
         
-        selected_model = body.get('model', 'together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free')
+        selected_model = body.get('model', 'gemini-2.5-flash')
+        
+        # 🔥 NEW: Option to use hybrid search
+        use_hybrid = body.get('use_hybrid_search', True)  # Default to hybrid
         
         print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
         print(f"🎯 Query: {query}")
-        print(f"🤖 Selected model: {selected_model}")
+        print(f"🤖 Model: {selected_model}")
+        print(f"🔍 Search mode: {'Hybrid' if use_hybrid else 'Vector only'}")
         
         # Check rate limit
         if not cache.check_rate_limit(user_id, 'chat', config.CHAT_RATE_LIMIT):
@@ -179,16 +186,18 @@ def chat_handler(event: Dict, context) -> Dict:
         if not session:
             return create_error_response(404, f'Session not found: {session_id}')
         
-        # 🔥 NEW: Get conversation history for context
-        previous_messages = db.get_session_messages(session_id, limit=10)  # Last 10 messages
+        # Get conversation history
+        previous_messages = db.get_session_messages(session_id, limit=10)
         
-        # Create cache key that includes conversation history
-        history_hash = hash(str([(m.get('role'), m.get('content', '')[:100]) for m in previous_messages[-6:]]))
-        cache_key = f"{query}_{selected_model}_{history_hash}"
+        # Create cache key
+        history_hash = hash(str([(m.get('role'), m.get('content', '')[:100]) 
+                                for m in previous_messages[-6:]]))
+        cache_key = f"{query}_{selected_model}_{history_hash}_{use_hybrid}"
         
+        # Check cache
         cached_result = cache.get_cached_query(user_id, cache_key)
         if cached_result:
-            print(f"💾 Returning cached response for {selected_model}")
+            print(f"💾 Returning cached response")
             return create_success_response({
                 'response': cached_result['response'],
                 'sources': cached_result['sources'],
@@ -197,29 +206,56 @@ def chat_handler(event: Dict, context) -> Dict:
             })
         
         # Generate query embedding
+        print(f"🔄 Generating query embedding...")
         query_embedding = vector_store.generate_embeddings([query])[0]
         
-        # 🔥 FIXED: Use enhanced search strategy
-        search_results = enhanced_search_strategy(
-            user_id,
-            query,
-            query_embedding,
-            session['document_set']
-        )
-        
-        if not search_results:
-            response_text = "I couldn't find relevant information in your documents to answer this question."
+        if query_embedding is None:
+            print(f"❌ Failed to generate query embedding")
+            response_text = "I encountered an error generating the search query. Please try again."
             sources = []
         else:
-            # 🔥 NEW: Generate response with conversation history
-            response_text, sources = generate_llm_response_with_history(
-                query, 
-                search_results, 
-                previous_messages,
-                selected_model
-            )
+            # 🔥 IMPROVED: Use hybrid search or standard search with lower threshold
+            if use_hybrid:
+                print(f"🔍 Using hybrid search (vector + exact match)...")
+                search_results = vector_store.hybrid_search(
+                    user_id,
+                    query,
+                    query_embedding,
+                    session['document_set'],
+                    top_k=15  # Get more results
+                )
+            else:
+                print(f"🔍 Using standard vector search with low threshold...")
+                search_results = vector_store.search(
+                    user_id,
+                    query_embedding,
+                    session['document_set'],
+                    top_k=15,
+                    min_score=0.0  # Accept all results, let LLM decide relevance
+                )
+            
+            print(f"📊 Search returned {len(search_results)} results")
+            
+            # Log top results
+            for i, result in enumerate(search_results[:3], 1):
+                match_type = result.get('match_type', 'semantic')
+                page_info = f", page {result.get('page_number')}" if 'page_number' in result else ""
+                print(f"  {i}. [{match_type}] Score: {result['score']:.3f}, "
+                      f"Doc: {result['document_id'][:8]}...{page_info}")
+            
+            if not search_results:
+                response_text = "I couldn't find relevant information in your documents to answer this question."
+                sources = []
+            else:
+                # Generate response with context
+                response_text, sources = generate_llm_response_with_history(
+                    query, 
+                    search_results, 
+                    previous_messages,
+                    selected_model
+                )
         
-        # Store messages in database
+        # Store messages
         db.add_message(user_id, session_id, 'user', query)
         db.add_message(user_id, session_id, 'assistant', response_text, sources)
         
@@ -231,13 +267,15 @@ def chat_handler(event: Dict, context) -> Dict:
         }
         cache.cache_query_result(user_id, cache_key, result)
         
-        print(f"✅ Response generated successfully with {selected_model}")
+        print(f"✅ Response generated successfully")
         
         return create_success_response({
             'response': response_text,
             'sources': sources,
             'cached': False,
-            'model_used': selected_model
+            'model_used': selected_model,
+            'search_mode': 'hybrid' if use_hybrid else 'vector',
+            'results_count': len(search_results) if 'search_results' in locals() else 0
         })
         
     except Exception as e:
@@ -248,73 +286,99 @@ def chat_handler(event: Dict, context) -> Dict:
 
 def generate_llm_response_with_history(query: str, contexts: List[Dict], 
                                      previous_messages: List[Dict], model: str = None) -> tuple:
-    """Generate response using LLM with CONVERSATION HISTORY and GROUPED SOURCES"""
+    """
+    Generate response using LLM - IMPROVED with better context formatting
+    🔥 IMPROVED: Show page numbers, highlight exact matches, better grouping
+    """
     
-    # 🔥 FIXED: Group contexts by document to avoid "multiple documents" confusion
+    # Group contexts by document
     document_groups = {}
     for ctx in contexts:
         doc_id = ctx.get('document_id', 'unknown')
         if doc_id not in document_groups:
             document_groups[doc_id] = {
                 'document_id': doc_id,
+                'filename': ctx.get('filename', 'Unknown'),
                 'chunks': [],
-                'best_score': 0
+                'best_score': 0,
+                'has_exact_match': False
             }
         document_groups[doc_id]['chunks'].append(ctx)
         document_groups[doc_id]['best_score'] = max(
             document_groups[doc_id]['best_score'], 
             ctx.get('score', 0)
         )
+        if ctx.get('exact_match', False):
+            document_groups[doc_id]['has_exact_match'] = True
     
-    # Sort documents by best score
-    sorted_docs = sorted(document_groups.values(), key=lambda x: x['best_score'], reverse=True)
-    # Take top 3 most relevant documents
+    # Sort documents: exact matches first, then by score
+    sorted_docs = sorted(
+        document_groups.values(), 
+        key=lambda x: (x['has_exact_match'], x['best_score']), 
+        reverse=True
+    )
+    
+    # Take top 3 documents
     top_documents = sorted_docs[:3]
     
-    # 🔥 NEW: Build conversation history
+    # Build conversation history
     conversation_context = ""
     if previous_messages:
         conversation_context = "\n\nPrevious conversation:\n"
-        # Only include last 6 messages to avoid token limits
         recent_messages = previous_messages[-6:]
         for msg in recent_messages:
             role = msg.get('role', 'unknown')
-            content = msg.get('content', '')[:200]  # Truncate long messages
+            content = msg.get('content', '')[:200]
             if role == 'user':
                 conversation_context += f"User: {content}\n"
             elif role == 'assistant':
                 conversation_context += f"Assistant: {content}\n"
     
-    # 🔥 FIXED: Build document context (grouped by document)
+    # Build document context with page numbers
     document_context = ""
     if top_documents:
         document_context = "\n\nRelevant information from your documents:\n\n"
         
         for i, doc_group in enumerate(top_documents, 1):
             doc_id = doc_group['document_id']
+            filename = doc_group['filename']
             chunks = doc_group['chunks']
+            has_exact = doc_group['has_exact_match']
             
             # Sort chunks by position to maintain document flow
             chunks.sort(key=lambda x: x.get('position', 0))
             
-            document_context += f"Document {i} (ID: {doc_id}):\n"
+            exact_marker = " [EXACT MATCH]" if has_exact else ""
+            document_context += f"Document {i}: {filename}{exact_marker}\n"
             
-            # Combine chunks from same document intelligently
+            # Combine chunks intelligently
             combined_text = ""
-            for chunk in chunks:
+            pages_covered = set()
+            
+            for chunk in chunks[:3]:  # Top 3 chunks per document
                 chunk_text = chunk.get('chunk_text', '')
+                page_num = chunk.get('page_number')
+                
+                if page_num:
+                    pages_covered.add(page_num)
+                
                 if chunk_text and chunk_text not in combined_text:
                     if combined_text:
-                        combined_text += " [...] "  # Indicate text continues
+                        combined_text += " [...] "
                     combined_text += chunk_text
             
-            # Limit combined text length
-            if len(combined_text) > 800:
-                combined_text = combined_text[:800] + "..."
+            # Limit combined text
+            if len(combined_text) > 1000:
+                combined_text = combined_text[:1000] + "..."
+            
+            # Add page information if available
+            if pages_covered:
+                pages_str = ", ".join(str(p) for p in sorted(pages_covered))
+                document_context += f"(Pages: {pages_str})\n"
             
             document_context += f"{combined_text}\n\n"
     
-    # 🔥 IMPROVED: Create comprehensive prompt
+    # Create comprehensive prompt
     prompt = f"""You are a helpful AI assistant. Based on the provided documents and conversation history, answer the user's question accurately and helpfully.
 
 {conversation_context}
@@ -325,10 +389,11 @@ Current question: {query}
 
 Instructions:
 - Answer based on the information provided in the documents
+- If documents are marked with [EXACT MATCH], prioritize that information
+- Include page numbers when referencing specific information
 - If the information isn't in the documents, say so clearly
 - Maintain context from the previous conversation when relevant
 - Be concise but thorough
-- Reference specific documents when appropriate
 
 Answer:"""
     
@@ -336,55 +401,66 @@ Answer:"""
     if not model:
         model = "together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
     
-    print(f"🤖 LLM Request - Full model: {model}")
+    print(f"🤖 LLM Request - Model: {model}")
     
     try:
-        # Dynamic routing based on model prefix
+        # Route to appropriate LLM
         if model.startswith("together-"):
             model_name = model.replace("together-", "")
-            print(f"🟢 Using Together AI with model: {model_name}")
             response_text = call_together_ai(prompt, model_name)
-            
         elif model.startswith("gemini-"):
             model_name = model.replace("gemini-", "")
             actual_model_name = f"gemini-{model_name}"
-            print(f"🔵 Using Gemini with model: {actual_model_name}")
             response_text = call_gemini(prompt, actual_model_name)
-            
         else:
-            print(f"⚠️ Unknown model format: {model}, using default Together AI")
             response_text = call_together_ai(prompt, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
             
     except Exception as e:
-        print(f"❌ LLM generation error with {model}: {str(e)}")
+        print(f"❌ LLM generation error: {str(e)}")
         import traceback
         traceback.print_exc()
         response_text = "I encountered an error while generating a response. Please try again."
     
-    # 🔥 FIXED: Format sources by document (not individual chunks)
+    # Format sources by document with page numbers
     sources = []
     for doc_group in top_documents:
         doc_id = doc_group['document_id']
+        filename = doc_group['filename']
         chunks = doc_group['chunks']
+        has_exact = doc_group['has_exact_match']
         
-        # Create a combined preview from top chunks
+        # Get pages from chunks
+        pages = set()
+        for chunk in chunks:
+            if 'page_number' in chunk:
+                pages.add(chunk['page_number'])
+        
+        # Create combined preview
         combined_preview = ""
-        for chunk in chunks[:2]:  # Top 2 chunks per document
+        for chunk in chunks[:2]:
             chunk_text = chunk.get('chunk_text', '')
             if chunk_text:
                 if combined_preview:
                     combined_preview += " ... "
                 combined_preview += chunk_text[:150]
         
-        if len(combined_preview) > 200:
-            combined_preview = combined_preview[:200] + "..."
+        if len(combined_preview) > 250:
+            combined_preview = combined_preview[:250] + "..."
         
-        sources.append({
+        source_info = {
             'document_id': doc_id,
+            'filename': filename,
             'text': combined_preview,
             'relevance_score': doc_group['best_score'],
-            'chunk_count': len(chunks)
-        })
+            'chunk_count': len(chunks),
+            'exact_match': has_exact
+        }
+        
+        # Add page info if available
+        if pages:
+            source_info['pages'] = sorted(list(pages))
+        
+        sources.append(source_info)
     
     return response_text, sources
 
@@ -981,6 +1057,226 @@ def get_messages_handler(event: Dict, context) -> Dict:
         traceback.print_exc()
         return create_error_response(500, 'Failed to get messages')
 
+def debug_find_text_handler(event: Dict, context) -> Dict:
+    """
+    🔥 NEW: Find exact text in vector store
+    POST /debug/find-text
+    Body: {"text": "your search text", "document_ids": ["doc1", "doc2"]}
+    """
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        body = json.loads(event['body'])
+        
+        search_text = body.get('text', '').strip()
+        document_ids = body.get('document_ids', [])
+        
+        if not search_text:
+            return create_error_response(400, 'Search text is required')
+        
+        # If no document IDs provided, get all active documents
+        if not document_ids:
+            docs = db.list_user_documents(user_id)
+            document_ids = [d['document_id'] for d in docs if d.get('active')]
+        
+        if not document_ids:
+            return create_error_response(400, 'No active documents found')
+        
+        print(f"🔍 Searching for text: '{search_text}' in {len(document_ids)} documents")
+        
+        # Use the debug search function
+        matches = vector_store.debug_search_for_text(user_id, search_text, document_ids)
+        
+        return create_success_response({
+            'query': search_text,
+            'matches': matches,
+            'count': len(matches),
+            'searched_documents': document_ids
+        })
+        
+    except Exception as e:
+        print(f"Debug find text error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, str(e))
+
+def debug_document_coverage_handler(event: Dict, context) -> Dict:
+    """
+    🔥 NEW: Check document coverage in vector store
+    GET /debug/document/{document_id}/coverage
+    """
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        document_id = event['pathParameters']['document_id']
+        
+        print(f"🔍 Checking coverage for document {document_id}")
+        
+        # Get document info
+        doc_info = vector_store.get_document_chunk_info(user_id, document_id)
+        
+        # Verify coverage
+        coverage = vector_store.verify_document_coverage(user_id, document_id)
+        
+        return create_success_response({
+            'document_id': document_id,
+            'info': doc_info,
+            'coverage': coverage
+        })
+        
+    except Exception as e:
+        print(f"Debug coverage error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, str(e))
+
+def debug_hybrid_search_handler(event: Dict, context) -> Dict:
+    """
+    🔥 NEW: Test hybrid search (vector + exact match)
+    POST /debug/hybrid-search
+    Body: {"query": "your query", "document_ids": ["doc1"]}
+    """
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        body = json.loads(event['body'])
+        
+        query = body.get('query', '').strip()
+        document_ids = body.get('document_ids', [])
+        
+        if not query:
+            return create_error_response(400, 'Query is required')
+        
+        # Get active documents if not specified
+        if not document_ids:
+            docs = db.list_user_documents(user_id)
+            document_ids = [d['document_id'] for d in docs if d.get('active')]
+        
+        if not document_ids:
+            return create_error_response(400, 'No active documents')
+        
+        print(f"🔍 Hybrid search: '{query}'")
+        
+        # Generate embedding
+        query_embedding = vector_store.generate_embeddings([query])[0]
+        
+        if query_embedding is None:
+            return create_error_response(500, 'Failed to generate query embedding')
+        
+        # Perform hybrid search
+        results = vector_store.hybrid_search(
+            user_id, query, query_embedding, document_ids, top_k=10
+        )
+        
+        return create_success_response({
+            'query': query,
+            'results': results,
+            'count': len(results)
+        })
+        
+    except Exception as e:
+        print(f"Hybrid search error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, str(e))
+
+def debug_vector_stats_handler(event: Dict, context) -> Dict:
+    """
+    🔥 NEW: Get Pinecone index statistics
+    GET /debug/vector-stats
+    """
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        
+        # Get index stats
+        stats = vector_store.get_index_stats()
+        
+        # Get user's document count
+        docs = db.list_user_documents(user_id)
+        active_docs = [d for d in docs if d.get('active')]
+        
+        # Get chunk info for each document
+        document_stats = []
+        for doc in active_docs[:5]:  # Limit to first 5 docs
+            doc_id = doc['document_id']
+            chunk_info = vector_store.get_document_chunk_info(user_id, doc_id)
+            document_stats.append({
+                'document_id': doc_id,
+                'filename': doc.get('filename', 'Unknown'),
+                'chunk_count': chunk_info.get('chunk_count', 0),
+                'sections': chunk_info.get('sections', {}),
+                'pages': chunk_info.get('pages', [])
+            })
+        
+        return create_success_response({
+            'user_id': user_id,
+            'index_stats': stats,
+            'user_documents': len(docs),
+            'active_documents': len(active_docs),
+            'document_stats': document_stats
+        })
+        
+    except Exception as e:
+        print(f"Vector stats error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, str(e))
+
+def test_search_quality_handler(event: Dict, context) -> Dict:
+    """
+    🔥 NEW: Test search quality with various thresholds
+    POST /debug/test-search
+    Body: {"query": "your query", "document_ids": ["doc1"], "thresholds": [0.0, 0.05, 0.1]}
+    """
+    try:
+        user_id = event['requestContext']['authorizer']['claims']['sub']
+        body = json.loads(event['body'])
+        
+        query = body.get('query', '').strip()
+        document_ids = body.get('document_ids', [])
+        thresholds = body.get('thresholds', [0.0, 0.05, 0.1, 0.15, 0.2])
+        
+        if not query:
+            return create_error_response(400, 'Query is required')
+        
+        # Get active documents if not specified
+        if not document_ids:
+            docs = db.list_user_documents(user_id)
+            document_ids = [d['document_id'] for d in docs if d.get('active')]
+        
+        print(f"🧪 Testing search quality for: '{query}'")
+        
+        # Generate embedding
+        query_embedding = vector_store.generate_embeddings([query])[0]
+        
+        if query_embedding is None:
+            return create_error_response(500, 'Failed to generate embedding')
+        
+        # Test with different thresholds
+        results_by_threshold = {}
+        
+        for threshold in thresholds:
+            results = vector_store.search(
+                user_id, query_embedding, document_ids,
+                top_k=20, min_score=threshold
+            )
+            
+            results_by_threshold[f"threshold_{threshold}"] = {
+                'count': len(results),
+                'top_5': results[:5] if results else []
+            }
+            
+            print(f"  Threshold {threshold}: {len(results)} results")
+        
+        return create_success_response({
+            'query': query,
+            'results_by_threshold': results_by_threshold,
+            'recommendation': 'Use threshold 0.0 for best recall, 0.1+ for precision'
+        })
+        
+    except Exception as e:
+        print(f"Test search error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return create_error_response(500, str(e))
+
 def handler_router(event: Dict, context):
     """Route to appropriate handler based on HTTP method and path"""
     try:
@@ -993,7 +1289,17 @@ def handler_router(event: Dict, context):
 
         # Handle CORS preflight
         if method == 'OPTIONS':
-            return create_success_response({"message": "CORS preflight success"})
+            print("→ Handling OPTIONS preflight request")
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token',
+                    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+                    'Access-Control-Allow-Credentials': 'true'
+                },
+                'body': json.dumps({})
+            }
 
         # Remove /api prefix if present for routing
         path = original_path
@@ -1003,7 +1309,17 @@ def handler_router(event: Dict, context):
         print(f"Processed path for routing: {path}")
 
         # Cache management routes - ADD MORE FLEXIBLE MATCHING
-        if path.endswith('/cache/clear') and method == 'POST':
+        if path == '/debug/find-text' and method == 'POST':
+            return debug_find_text_handler(event, context)
+        elif path.startswith('/debug/document/') and path.endswith('/coverage') and method == 'GET':
+            return debug_document_coverage_handler(event, context)
+        elif path == '/debug/hybrid-search' and method == 'POST':
+            return debug_hybrid_search_handler(event, context)
+        elif path == '/debug/vector-stats' and method == 'GET':
+            return debug_vector_stats_handler(event, context)
+        elif path == '/debug/test-search' and method == 'POST':
+            return test_search_quality_handler(event, context)
+        elif path.endswith('/cache/clear') and method == 'POST':
             print("Routing to clear_cache_handler")
             return clear_cache_handler(event, context)
         elif path.endswith('/cache/stats') and method == 'GET':
