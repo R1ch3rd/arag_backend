@@ -216,8 +216,58 @@ class VectorStore:
         if failed_batches > 0:
             print(f"⚠️  {failed_batches} batches failed to upsert")
     
-    def search(self, user_id: str, query_embedding: List[float], 
-              document_ids: List[str], top_k: int = 5, 
+    def search_namespace(self, namespace: str, query_embedding: List[float],
+                         top_k: int = 8, min_score: float = 0.0) -> List[Dict]:
+        """
+        Search an entire namespace without a document filter.
+        Used by public guest workspaces where all seeded docs are in scope.
+        """
+        if not query_embedding:
+            return []
+
+        print(f"🔍 Namespace-wide search in '{namespace}', top_k={top_k}")
+
+        try:
+            results = self.index.query(
+                vector=query_embedding,
+                namespace=namespace,
+                top_k=min(top_k * 3, 60),
+                include_metadata=True
+            )
+
+            matches = results.get('matches', [])
+            output = []
+            for match in matches:
+                score = float(match.get('score', 0))
+                if score < min_score:
+                    continue
+                metadata = match.get('metadata', {})
+                item = {
+                    'document_id': metadata.get('document_id'),
+                    'chunk_text': metadata.get('chunk_text', ''),
+                    'score': score,
+                    'position': metadata.get('chunk_position', 0),
+                    'position_percentage': metadata.get('position_percentage', 0),
+                    'document_section': metadata.get('document_section', 'unknown'),
+                    'word_count': metadata.get('word_count', 0),
+                    'document_coverage': metadata.get('document_coverage', ''),
+                    'total_chunks_in_doc': metadata.get('total_chunks_in_doc', 1),
+                }
+                if 'page_number' in metadata:
+                    item['page_number'] = metadata['page_number']
+                if 'filename' in metadata:
+                    item['filename'] = metadata['filename']
+                output.append(item)
+
+            output.sort(key=lambda x: x['score'], reverse=True)
+            return output[:top_k]
+
+        except Exception as e:
+            print(f"❌ Namespace search error: {str(e)}")
+            return []
+
+    def search(self, user_id: str, query_embedding: List[float],
+              document_ids: List[str], top_k: int = 5,
               min_score: float = 0.0) -> List[Dict]:
         """
         Search for similar chunks within user's documents

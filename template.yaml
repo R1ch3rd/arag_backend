@@ -101,6 +101,13 @@ Resources:
     Properties:
       Name: rag-system-api
       StageName: prod
+      # Cost guardrail: cap the whole stage so runaway traffic can't
+      # push Lambda/API GW past free-tier territory.
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
       Cors:
         AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
         AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
@@ -375,6 +382,25 @@ Resources:
           Properties:
             RestApiId: !Ref Api
             Path: /cache/{proxy+}
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+        # Public guest chat: powers "try as guest" on the aRAG site and
+        # the chat widget embedded on the portfolio. No Cognito; the
+        # handler enforces per-IP rate limits via Upstash.
+        GuestChat:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /guest/chat
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        OptionsGuestChat:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /guest/chat
             Method: OPTIONS
             Auth:
               Authorizer: NONE
