@@ -89,11 +89,16 @@ class CacheClient:
                 f"rate_limit:{user_id}:*",
                 f"user:{user_id}:*"
             ]
-            
+
             all_keys = []
             for pattern in patterns:
                 keys = self.keys(pattern)
                 all_keys.extend(keys)
+
+            # The documents list caches under its own key that matches none
+            # of the patterns above; without this, uploads/deletes serve a
+            # stale (possibly empty) list for up to the 5-minute TTL.
+            all_keys.append(f"documents_list_{user_id}")
             
             if all_keys:
                 # Delete all keys in batches (Upstash has limits on command size)
