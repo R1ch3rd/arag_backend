@@ -1427,6 +1427,11 @@ def handler_router(event: Dict, context):
         
         print(f"Processed path for routing: {path}")
 
+        # Scheduled warmer ping: keeps the container hot so real requests
+        # never pay the full cold start (which can exceed API GW's 29s cap)
+        if path == '/warmer':
+            return {'statusCode': 200, 'body': 'warm'}
+
         # Public guest chat (no auth; rate-limited per IP inside the handler)
         if path == '/guest/chat' and method == 'POST':
             from chat.guest import guest_chat_handler

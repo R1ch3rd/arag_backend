@@ -404,6 +404,14 @@ Resources:
             Method: OPTIONS
             Auth:
               Authorizer: NONE
+        # Keep one container warm: cold starts (pinecone + torch-free but
+        # heavy imports) can exceed API Gateway's 29s cap and surface as
+        # CORS failures in browsers. ~8.6K invocations/month, free tier.
+        WarmerSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Input: '{"path": "/warmer", "httpMethod": "GET"}'
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable

@@ -3,7 +3,6 @@ PyPDF2
 python-docx
 pinecone
 requests
-docx
 PyJWT
 python-dateutil
 google-generativeai
