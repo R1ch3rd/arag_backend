@@ -25,7 +25,7 @@ class Config:
     
     # Hugging Face (for embeddings)
     HF_API_TOKEN = os.environ.get('HF_API_TOKEN')
-    EMBEDDING_MODEL = 'text-embedding-004'
+    EMBEDDING_MODEL = 'gemini-embedding-2'  # text-embedding-004 retired by Google
     EMBEDDING_DIMENSION = 768
     
     # LLM (Together AI or Groq)

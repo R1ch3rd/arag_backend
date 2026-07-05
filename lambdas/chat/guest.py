@@ -21,7 +21,7 @@ GUEST_RATE_LIMIT = 20          # requests per IP per window
 GUEST_RATE_WINDOW = 3600       # seconds
 GUEST_MAX_MESSAGE_CHARS = 500
 GUEST_TOP_K = 8
-GUEST_MODEL = "gemini-gemini-2.5-flash"  # routed by prefix in generate_llm_response_with_history
+GUEST_MODEL = "gemini-flash-latest"  # alias tracks current stable Flash; routed by prefix
 
 
 def _client_ip(event: Dict) -> str:

@@ -47,7 +47,7 @@ class VectorStore:
         if not config.GEMINI_API_KEY:
             raise Exception("GEMINI_API_KEY not configured")
 
-        model = "models/text-embedding-004"
+        model = f"models/{config.EMBEDDING_MODEL}"
         url = f"https://generativelanguage.googleapis.com/v1beta/{model}:embedContent"
 
         headers = {
@@ -63,7 +63,10 @@ class VectorStore:
                     "model": model,
                     "content": {
                         "parts": [{"text": text}]
-                    }
+                    },
+                    # gemini-embedding-001 defaults to 3072 dims; the Pinecone
+                    # index is 768. Cosine metric, so no renormalization needed.
+                    "outputDimensionality": config.EMBEDDING_DIMENSION
                 }
 
                 response = requests.post(url, headers=headers, json=payload, timeout=30)

@@ -222,7 +222,7 @@ def chat_handler(event: Dict, context) -> Dict:
         body = json.loads(event['body'])
         query = body['message']
         
-        selected_model = body.get('model', 'gemini-2.5-flash')
+        selected_model = body.get('model', 'gemini-flash-latest')
         use_hybrid = body.get('use_hybrid_search', True)
         
         print(f"💬 Chat request - User: {user_id}, Session: {session_id}")
@@ -518,7 +518,7 @@ Answer:"""
     
     # Extract provider from model string
     if not model:
-        model = "together-meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+        model = "gemini-flash-latest"
     
     print(f"🤖 LLM Request - Model: {model}")
     
@@ -532,7 +532,7 @@ Answer:"""
             actual_model_name = f"gemini-{model_name}"
             response_text = call_gemini(prompt, actual_model_name)
         else:
-            response_text = call_together_ai(prompt, "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free")
+            response_text = call_gemini(prompt, "gemini-flash-latest")
             
     except Exception as e:
         print(f"❌ LLM generation error: {str(e)}")
@@ -1079,7 +1079,7 @@ def call_together_ai(prompt: str, model: str = "meta-llama/Llama-3.3-70B-Instruc
         traceback.print_exc()
         return "I encountered an error while generating a response. Please try again."
 
-def call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
+def call_gemini(prompt: str, model: str = "gemini-flash-latest") -> str:
     """Call Google Gemini API with specific model"""
     
     print(f"🔵 Gemini - Starting request with model: {model}")
