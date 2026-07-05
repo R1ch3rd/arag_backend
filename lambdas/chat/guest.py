@@ -21,6 +21,7 @@ GUEST_RATE_LIMIT = 20          # requests per IP per window
 GUEST_RATE_WINDOW = 3600       # seconds
 GUEST_MAX_MESSAGE_CHARS = 500
 GUEST_TOP_K = 8
+GUEST_CONTEXT_CHAR_BUDGET = 9000
 GUEST_MODEL = "gemini-flash-latest"  # alias tracks current stable Flash; routed by prefix
 
 
@@ -71,22 +72,63 @@ def guest_chat_handler(event: Dict, context) -> Dict:
         return create_error_response(502, "Search unavailable")
 
     # Import here to avoid circulars (handler imports guest for routing).
-    from chat.handler import generate_llm_response_with_history
+    from chat.handler import call_gemini
 
-    response_text, rich_sources = generate_llm_response_with_history(
-        query=message,
-        contexts=contexts,
-        previous_messages=[],
-        model=GUEST_MODEL,
-    )
+    # Own context builder: the legacy prompt builder caps each document at
+    # 1000 chars, which starves single-document guest workspaces. Guests get
+    # full retrieved chunks up to a generous overall budget instead.
+    context_parts = []
+    budget = GUEST_CONTEXT_CHAR_BUDGET
+    for c in contexts:
+        chunk = (c.get("chunk_text") or "").strip()
+        if not chunk:
+            continue
+        label = c.get("filename", "document")
+        if c.get("page_number"):
+            label += f", page {c['page_number']}"
+        block = f"[{label}]\n{chunk}"
+        if len(block) > budget:
+            break
+        context_parts.append(block)
+        budget -= len(block)
+
+    prompt = f"""You are the assistant on aRAG, a retrieval-augmented generation system. Answer the visitor's question using only the document excerpts below.
+
+Document excerpts:
+{chr(10).join(context_parts) if context_parts else "(no relevant excerpts found)"}
+
+Question: {message}
+
+Instructions:
+- Ground every claim in the excerpts; if they don't contain the answer, say so plainly
+- Cite page numbers when the excerpt labels include them
+- Be concise and direct"""
+
+    try:
+        response_text = call_gemini(prompt, GUEST_MODEL)
+    except Exception as e:
+        print(f"Guest LLM failed: {e}")
+        return create_error_response(502, "Generation unavailable")
+
+    # Source list: unique filenames with the pages that contributed
+    by_file = {}
+    for c in contexts:
+        name = c.get("filename")
+        if not name:
+            continue
+        entry = by_file.setdefault(name, {"filename": name, "pages": set(),
+                                          "relevance_score": 0.0})
+        entry["relevance_score"] = max(entry["relevance_score"], float(c.get("score", 0)))
+        if c.get("page_number"):
+            entry["pages"].add(int(c["page_number"]))
 
     sources = [
         {
-            "filename": s.get("filename"),
-            "pages": s.get("pages", []),
-            "relevance_score": round(float(s.get("relevance_score", 0)), 3),
+            "filename": e["filename"],
+            "pages": sorted(e["pages"]),
+            "relevance_score": round(e["relevance_score"], 3),
         }
-        for s in (rich_sources or [])
+        for e in by_file.values()
     ]
 
     return create_success_response({
