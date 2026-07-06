@@ -714,3 +714,47 @@ def handler_router(event: Dict, context) -> Dict:
         print(f"Documents handler router error: {str(e)}")
         traceback.print_exc()
         return create_response(500, {'error': 'Internal server error'})
+
+def view_handler(event: Dict, context) -> Dict:
+    """GET /documents/{document_id}/view
+    Returns a short-lived presigned S3 URL so the owner can open the
+    original file in a new tab."""
+    # Handle OPTIONS preflight request
+    if event.get('httpMethod') == 'OPTIONS':
+        return create_response(200, {})
+
+    try:
+        user_id = get_user_id(event)
+        document_id = (event.get('pathParameters') or {}).get('document_id')
+        if not document_id:
+            return create_response(400, {'error': 'document_id is required'})
+
+        table = dynamodb.Table(DOCUMENTS_TABLE)
+        item = table.get_item(
+            Key={'PK': f'USER#{user_id}', 'SK': f'DOC#{document_id}'}
+        ).get('Item')
+
+        if not item:
+            return create_response(404, {'error': 'Document not found'})
+
+        s3_key = item.get('s3_key')
+        filename = item.get('filename', 'document')
+        if not s3_key:
+            return create_response(404, {'error': 'Document file is missing'})
+
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': DOCUMENTS_BUCKET,
+                'Key': s3_key,
+                'ResponseContentDisposition': f'inline; filename="{filename}"',
+            },
+            ExpiresIn=300,
+        )
+
+        return create_response(200, {'url': url, 'filename': filename})
+
+    except Exception as e:
+        print(f"View document error: {str(e)}")
+        traceback.print_exc()
+        return create_response(500, {'error': 'Failed to generate view link'})

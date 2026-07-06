@@ -267,6 +267,32 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentsTable
 
+  DocumentViewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/
+      Handler: documents.handler.view_handler
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/{document_id}/view
+            Method: GET
+        OptionsEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /documents/{document_id}/view
+            Method: OPTIONS
+            Auth:
+              Authorizer: NONE
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucketName
+
   DocumentDeleteFunction:
     Type: AWS::Serverless::Function
     Properties:
