@@ -2,6 +2,10 @@
 
 A robust, scalable Retrieval-Augmented Generation (RAG) system backend built on AWS serverless architecture. This system enables intelligent document-based conversations using advanced LLM integration and vector search capabilities.
 
+**Live demo:** https://arag-swart.vercel.app &nbsp;·&nbsp; **API:** `https://zxfxvm0t0b.execute-api.us-east-1.amazonaws.com/prod`
+
+A public, rate-limited `POST /guest/chat` endpoint powers the site's guest demo and the chat widget on https://r1ch3rd.github.io/folio. Frontend: https://github.com/R1ch3rd/arag_frontend
+
 ## 🏗️ Architecture Overview
 
 The backend follows a microservices architecture using AWS Lambda functions, DynamoDB for data persistence, Pinecone for vector storage, and Redis for caching.
