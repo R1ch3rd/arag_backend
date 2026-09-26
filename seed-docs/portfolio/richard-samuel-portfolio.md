@@ -15,15 +15,16 @@ Portfolio: r1ch3rd.github.io/folio
 
 ## Research and Publications
 
-### Enhanced Multi-Scale Deep Image Prior for Unsupervised Remote Sensing Image Restoration
-Status: Under review at IEEE Geoscience and Remote Sensing Letters (GRSL),
-Manuscript GRSL-01134-2026. Unsupervised restoration of satellite imagery using a
-multi-scale deep image prior, removing the need for paired clean/corrupted training
-data. Developed during a research internship at ISRO/NRSC (Indian Space Research
-Organisation / National Remote Sensing Centre).
+### Enhanced Multi-Scale Pyramid Deep Image Prior for Unsupervised Remote Sensing Image Restoration
+Published in IEEE Geoscience and Remote Sensing Letters (GRSL), 2026 (Early Access
+on IEEE Xplore), DOI 10.1109/LGRS.2026.3735466. Unsupervised restoration of
+satellite imagery using a multi-scale pyramid deep image prior, removing the need
+for paired clean/corrupted training data. Developed during a research internship at
+ISRO/NRSC (Indian Space Research Organisation / National Remote Sensing Centre).
+Code: github.com/R1ch3rd/EMSP-DIP
 
-### FedHyperGNN: A Federated Hypergraph Neural Network for Privacy-Preserving Recommendations
-Accepted at IEEE NMITCON 2026. A federated learning approach using hypergraph neural
+### FedHyperGNN: Temporal Hypergraph Neural Networks for Privacy-Preserving Federated Recommendation Systems
+Accepted and presented at IEEE NMITCON 2026 (Bengaluru, September 2026). A federated learning approach using hypergraph neural
 networks to model higher-order user-item relationships in recommendation systems,
 without centralizing user data. Includes differential privacy guarantees with a
 configurable privacy budget.
@@ -36,9 +37,9 @@ actions at inference time to restore classifier accuracy on perturbed fetal brai
 ultrasound images, defending an EfficientNet-B0 classifier against attacks
 including PGD, BIM, R+FGSM, DeepFool, and Carlini-Wagner.
 
-### ICCTSD Conference Publication
-Published at the International Conference on Computational Techniques in Science
-and Defense.
+### CAT-SR: Cross-Market Attention Transfer for Seller Recommendations
+Published at ICCTSD, the International Conference on Computational Techniques in
+Science and Defense.
 
 ## Projects
 
