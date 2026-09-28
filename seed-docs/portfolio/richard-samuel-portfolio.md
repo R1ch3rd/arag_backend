@@ -30,7 +30,7 @@ without centralizing user data. Includes differential privacy guarantees with a
 configurable privacy budget.
 
 ### Reinforcement Learning-Based Adversarial Defense for Medical Imaging
-Won Best Paper, Scopus-indexed, at PSG College of Technology. A PPO-based
+Won the Best Paper Award at Research Conclave 2026, PSG College of Technology. A PPO-based
 reinforcement learning framework for defending medical imaging classifiers against
 adversarial perturbations. The RL agent selects image preprocessing and denoising
 actions at inference time to restore classifier accuracy on perturbed fetal brain
@@ -38,7 +38,7 @@ ultrasound images, defending an EfficientNet-B0 classifier against attacks
 including PGD, BIM, R+FGSM, DeepFool, and Carlini-Wagner.
 
 ### CAT-SR: Cross-Market Attention Transfer for Seller Recommendations
-Published at ICCTSD, the International Conference on Computational Techniques in
+Presented at ICCTSD, the International Conference on Computational Techniques in
 Science and Defense.
 
 ## Projects
