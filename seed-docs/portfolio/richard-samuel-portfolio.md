@@ -8,7 +8,7 @@ systems and production ML infrastructure.
 Education: B.E. in Computer Science with an AI & ML specialization from PSG College
 of Technology.
 
-Contact: richysamdom@gmail.com
+Contact: richard.samuel.rsd@gmail.com
 GitHub: github.com/R1ch3rd
 LinkedIn: linkedin.com/in/richard-samuel-d
 Portfolio: r1ch3rd.github.io/folio
@@ -73,14 +73,14 @@ API. FastAPI backend.
 
 ## Interests outside work
 
-Tennis (his portfolio hides a playable tennis-pong game), video games (usually
-mid-way through something on the PS5), LEGO, and robotics. The long-term obsession
-is agents with bodies.
+Tennis (a regular player; the portfolio includes a small playable tennis game),
+console gaming, LEGO, and robotics. Embodied agents are a long-term research
+interest.
 
 ## Frequently asked
 
 What is Richard looking for? Conversations about agentic AI systems, applied ML,
-and research collaboration. Reach out at richysamdom@gmail.com.
+and research collaboration. Reach out at richard.samuel.rsd@gmail.com.
 
 What stack does he work with? Python, PyTorch, LangGraph, MCP servers, AWS
 serverless (Lambda, DynamoDB, Cognito, API Gateway), FastAPI, React/TypeScript,
