@@ -74,7 +74,8 @@ API. FastAPI backend.
 ## Interests outside work
 
 Tennis (a regular player; the portfolio includes a small playable tennis game),
-console gaming, LEGO, and robotics. Embodied agents are a long-term research
+photography (selected work at vsco.co/richychrich86/gallery), console gaming,
+LEGO, and robotics. Embodied agents are a long-term research
 interest.
 
 ## Frequently asked
